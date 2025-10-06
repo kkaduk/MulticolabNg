@@ -6,7 +6,6 @@
     </encoder>
   </appender>
 
-  <!-- Adjust log levels as needed -->
   <logger name="org.apache.pekko" level="INFO"/>
   <logger name="org.apache.pekko.actor" level="INFO"/>
 
