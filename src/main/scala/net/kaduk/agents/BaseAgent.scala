@@ -1,0 +1,39 @@
+package net.kaduk.agents
+
+import org.apache.pekko.actor.typed.{ActorRef, Behavior}
+import org.apache.pekko.actor.typed.scaladsl.{ActorContext, Behaviors}
+import net.kaduk.domain.{Message, ConversationContext, AgentCapability}
+import org.slf4j.MDC
+
+object BaseAgent:
+  
+  sealed trait Command
+  case class ProcessMessage(
+    message: Message,
+    context: ConversationContext,
+    replyTo: ActorRef[Response]
+  ) extends Command
+  
+  case class StreamMessage(
+    message: Message,
+    context: ConversationContext,
+    replyTo: ActorRef[StreamResponse]
+  ) extends Command
+  
+  case object Stop extends Command
+  case object GetStatus extends Command
+  
+  sealed trait Response
+  case class ProcessedMessage(message: Message, updatedContext: ConversationContext) extends Response
+  case class ProcessingFailed(error: String, messageId: String) extends Response
+  case class AgentStatusResponse(status: String, load: Int) extends Response
+  
+  sealed trait StreamResponse
+  case class StreamChunk(content: String, messageId: String) extends StreamResponse
+  case class StreamComplete(message: Message) extends StreamResponse
+  case class StreamError(error: String) extends StreamResponse
+
+  def withLogging[T](ctx: ActorContext[?], conversationId: String)(f: => Behavior[T]): Behavior[T] =
+    MDC.put("conversationId", conversationId)
+    MDC.put("agentId", ctx.self.path.name)
+    try f finally MDC.clear()

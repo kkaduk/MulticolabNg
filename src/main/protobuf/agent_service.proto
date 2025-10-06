@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package net.kaduk.protobuf;
+
+service AgentService {
+  rpc Chat(stream ChatMessage) returns (stream ChatResponse);
+  rpc GetAgentStatus(AgentStatusRequest) returns (AgentStatusResponse);
+}
+
+message ChatMessage {
+  string conversation_id = 1;
+  string content = 2;
+  string role = 3;
+  map<string, string> metadata = 4;
+}
+
+message ChatResponse {
+  string message_id = 1;
+  string content = 2;
+  bool is_complete = 3;
+  string error = 4;
+}
+
+message AgentStatusRequest {
+  string agent_id = 1;
+}
+
+message AgentStatusResponse {
+  string status = 1;
+  int32 active_conversations = 2;
+}
