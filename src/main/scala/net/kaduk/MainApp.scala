@@ -54,7 +54,7 @@ object MainApp:
       val service: HttpRequest => Future[HttpResponse] =
         AgentServiceHandler(AgentServiceImpl(coordinatorRef))
       
-      Http().newServerAt("0.0.0.0", 8080).bind(service).onComplete:
+      Http().newServerAt("0.0.0.0", 6060).bind(service).onComplete:
         case Success(binding) =>
           ctx.log.info(s"gRPC server bound to ${binding.localAddress}")
         case Failure(ex) =>
