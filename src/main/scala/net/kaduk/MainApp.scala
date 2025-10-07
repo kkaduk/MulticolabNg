@@ -56,9 +56,9 @@ object MainApp:
       
       Http().newServerAt("0.0.0.0", 6060).bind(service).onComplete:
         case Success(binding) =>
-          ctx.log.info(s"gRPC server bound to ${binding.localAddress}")
+          ctx.system.log.info(s"gRPC server bound to ${binding.localAddress}")
         case Failure(ex) =>
-          ctx.log.error("Failed to bind gRPC server", ex)
+          ctx.system.log.error("Failed to bind gRPC server", ex)
           ctx.system.terminate()
       
       Behaviors.empty
