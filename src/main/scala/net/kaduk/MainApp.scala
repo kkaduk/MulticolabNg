@@ -7,7 +7,8 @@ import org.apache.pekko.http.scaladsl.model.{HttpRequest, HttpResponse}
 import net.kaduk.agents.{CoordinatorAgent, LLMAgent}
 import net.kaduk.infrastructure.llm.{OpenAIProvider, ClaudeProvider, OllamaProvider, VertexProvider}
 import net.kaduk.infrastructure.registry.AgentRegistry
-import net.kaduk.infrastructure.grpc.{AgentServiceImpl, AgentServiceHandler}
+import net.kaduk.infrastructure.grpc.AgentServiceImpl
+import net.kaduk.protobuf.agent_service.AgentServiceHandler
 import net.kaduk.config.AppConfig
 import net.kaduk.domain.{AgentCapability, AgentType}
 import scala.concurrent.{ExecutionContext, Future}

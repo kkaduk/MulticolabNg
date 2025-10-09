@@ -59,7 +59,7 @@ object CoordinatorAgent:
         TaskStep("viz-agent", "Create visualization", Seq("sql-agent"))
       ))
     else
-      TaskPlan(Seq(TaskStep("llm-agent", task, Seq.empty)))
+      TaskPlan(Seq(TaskStep("sql-agent", task, Seq.empty)))
 
   private def executePlan(
     plan: TaskPlan,
