@@ -2,7 +2,7 @@ val scala3Version = "3.3.6"
 val pekkoVersion = "1.0.2"
 val pekkoHttpVersion = "1.2.0"
 val pekkoGrpcVersion = "1.0.2"
-val cequenceVersion = "1.0.0"
+val cequenceVersion = "1.2.0"
 
 lazy val root = project
   .in(file("."))
@@ -31,7 +31,11 @@ lazy val root = project
       "org.apache.pekko" %% "pekko-grpc-runtime" % pekkoGrpcVersion,
       
       // LLM Clients
-      "io.cequence" %% "openai-scala-client" % "1.0.0",
+      "io.cequence" %% "openai-scala-client" % cequenceVersion,
+      "io.cequence" %% "openai-scala-anthropic-client" % cequenceVersion,
+      "io.cequence" %% "openai-scala-google-vertexai-client" % cequenceVersion,
+      "io.cequence" %% "openai-scala-google-gemini-client" % cequenceVersion,
+
       
       // Logging
       "ch.qos.logback" % "logback-classic" % "1.4.14",
