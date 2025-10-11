@@ -25,12 +25,15 @@ class AgentServiceImpl(
 
   private val log: Logger = LoggerFactory.getLogger(getClass)
 
+  private def parseRole(s: String): MessageRole =
+    MessageRole.values.find(_.toString.equalsIgnoreCase(s)).getOrElse(MessageRole.User)
+
   override def chat(in: Source[ChatMessage, NotUsed]): Source[ChatResponse, NotUsed] =
     in.flatMapConcat { msg =>
       log.info(s"receiving from cmd ${msg}")
       val context = ConversationContext(msg.conversationId)
       val domainMsg = Message(
-        role = MessageRole.valueOf(msg.role),
+        role = parseRole(msg.role),
         content = MessageContent(msg.content, msg.metadata),
         conversationId = msg.conversationId
       )

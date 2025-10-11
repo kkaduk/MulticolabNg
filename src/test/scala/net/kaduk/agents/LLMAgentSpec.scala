@@ -10,6 +10,8 @@ import scala.concurrent.Future
 
 class LLMAgentSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike:
 
+  given scala.concurrent.ExecutionContext = system.executionContext
+
   class MockLLMProvider extends LLMProvider:
     override def name: String = "mock"
     
@@ -42,9 +44,8 @@ class LLMAgentSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike:
       
       val context = ConversationContext("test-conv")
       
-      agent ! BaseAgent.ProcessMessage(message, context, probe.ref)
+      agent ! BaseAgent.ProcessMessage(message, context, probe.ref.unsafeUpcast[Any])
       
       probe.expectMessageType[BaseAgent.ProcessedMessage]
     }
   }
-
