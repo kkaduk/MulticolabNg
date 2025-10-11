@@ -31,7 +31,7 @@ class AgentServiceImpl(
   override def chat(in: Source[ChatMessage, NotUsed]): Source[ChatResponse, NotUsed] =
     in.flatMapConcat { msg =>
       log.info(s"receiving from cmd ${msg}")
-      val context = ConversationContext(msg.conversationId)
+      val context = ConversationContext(msg.conversationId, metadata = msg.metadata)
       val domainMsg = Message(
         role = parseRole(msg.role),
         content = MessageContent(msg.content, msg.metadata),

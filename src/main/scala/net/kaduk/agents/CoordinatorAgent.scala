@@ -5,13 +5,55 @@ import org.apache.pekko.actor.typed.scaladsl.{ActorContext, Behaviors}
 import net.kaduk.domain.*
 import net.kaduk.infrastructure.registry.AgentRegistry
 import net.kaduk.agents.BaseAgent.*
-import scala.concurrent.{ExecutionContext, Future}
-import scala.util.{Success, Failure}
+import scala.concurrent.{ExecutionContext}
+import scala.util.{Success, Failure, Try}
 
+/**
+ * CoordinatorAgent
+ *
+ * - Decomposes an incoming task into an acyclic graph (DAG) of steps.
+ * - Dispatches ready steps to specialized agents once their dependencies are satisfied.
+ * - Collects all responses, aggregates them, and returns a single final response.
+ * - Optionally loops the conversation up to k times if the final result is not satisfactory.
+ *   The loop count can be provided via ConversationContext.metadata("maxLoops"), defaults to 1.
+ *   Satisfaction is heuristically determined using either:
+ *     - response.content.metadata("satisfied") == "true", or
+ *     - response.content.text contains "[done]" (case-insensitive).
+ *
+ * Protocol note:
+ * This actor keeps its protocol strictly as BaseAgent.Command to avoid extending the sealed trait
+ * from another file. Correlation of step completions is achieved by:
+ *  - Attaching "stepId" into the metadata of the user message sent to a specialized agent
+ *  - Tracking user message id -> stepId mapping in TaskState.msgIdToStep
+ *  - On ProcessedMessage, extracting the last user message id from the updatedContext and resolving stepId
+ *  - On ProcessingFailed, using the provided messageId to resolve stepId via msgIdToStep
+ */
 object CoordinatorAgent:
-  
-  case class TaskPlan(steps: Seq[TaskStep])
-  case class TaskStep(agentCapability: String, instruction: String, dependencies: Seq[String] = Seq.empty)
+
+  // Public types to represent a DAG plan
+  case class TaskPlan(steps: Seq[TaskStep]):
+    // Index by id for quick lookup
+    lazy val byId: Map[String, TaskStep] = steps.map(s => s.id -> s).toMap
+
+  case class TaskStep(
+    id: String,                      // Unique step ID inside the plan
+    agentCapability: String,         // Name to resolve the agent via AgentRegistry
+    instruction: String,             // Instruction for this step
+    dependencies: Seq[String] = Seq.empty // Other step IDs that must complete first
+  )
+
+  // Internal state for a single conversation execution
+  private case class TaskState(
+    plan: TaskPlan,
+    replyTo: ActorRef[Response],
+    context: ConversationContext,
+    results: Map[String, Message] = Map.empty, // stepId -> agent response message
+    completed: Set[String] = Set.empty,
+    inProgress: Set[String] = Set.empty,
+    attempts: Int = 0,
+    maxAttempts: Int = 1,
+    msgIdToStep: Map[String, String] = Map.empty // user message id -> stepId
+  )
 
   def apply(registry: AgentRegistry)(using ec: ExecutionContext): Behavior[Command] =
     Behaviors.setup: ctx =>
@@ -19,74 +61,268 @@ object CoordinatorAgent:
 
   private def idle(
     registry: AgentRegistry,
-    activeTasks: Map[String, (TaskPlan, ActorRef[Response])]
+    activeTasks: Map[String, TaskState]
   )(using ctx: ActorContext[Command], ec: ExecutionContext): Behavior[Command] =
 
     Behaviors.receiveMessage:
       case ProcessMessage(message, context, replyTo) =>
-        ctx.log.info(s"Coordinating task for conversation ${context.id}")
+        withLogging(ctx, context.id):
+          ctx.log.info(s"Coordinating task for conversation ${context.id}")
 
-        val plan = decomposeTask(message.content.text)
-        executePlan(plan, context, registry)
+          val plan = decomposeTask(message.content.text)
+          val maxLoops = context.metadata
+            .get("maxLoops")
+            .flatMap(s => Try(s.toInt).toOption)
+            .filter(_ >= 1)
+            .getOrElse(1)
 
-        coordinating(registry, activeTasks + (context.id -> (plan, replyTo)))
+          val state0 = TaskState(
+            plan = plan,
+            replyTo = replyTo.asInstanceOf[ActorRef[Response]],
+            context = context,
+            attempts = 0,
+            maxAttempts = maxLoops
+          )
+
+          val state1 = dispatchReadySteps(context.id, state0, registry)
+
+          coordinating(registry, activeTasks + (context.id -> state1))
 
       case Stop =>
         Behaviors.stopped
 
-      case _ =>
+      case other =>
+        ctx.log.debug(s"Ignoring message in idle: $other")
         Behaviors.same
 
   private def coordinating(
     registry: AgentRegistry,
-    activeTasks: Map[String, (TaskPlan, ActorRef[Response])]
+    activeTasks: Map[String, TaskState]
   )(using ctx: ActorContext[Command], ec: ExecutionContext): Behavior[Command] =
     Behaviors.receiveMessage:
-      case msg: ProcessedMessage =>
-        ctx.log.info(s"Step completed for ${msg.updatedContext.id}")
-        val (plan, originalReplyTo) = activeTasks(msg.updatedContext.id)
-        originalReplyTo ! msg
-        idle(registry, activeTasks - msg.updatedContext.id)
+      case pm: ProcessedMessage =>
+        val convId = pm.updatedContext.id
+        withLogging(ctx, convId):
+          val state = activeTasks.getOrElse(convId,
+            return idle(registry, activeTasks) // No state, ignore and go idle
+          )
+
+          // The last user message id added just before the agent's assistant response
+          val lastUserIdOpt =
+            pm.updatedContext.messages.reverse.find(_.role == MessageRole.User).map(_.id)
+
+          val stepIdOpt = lastUserIdOpt.flatMap(state.msgIdToStep.get)
+
+          stepIdOpt match
+            case None =>
+              ctx.log.warn(s"Could not correlate ProcessedMessage to a step for conversation $convId")
+              // As a fallback, reply aggregated result
+              val aggregated = aggregateResults(state.copy(context = pm.updatedContext))
+              state.replyTo ! ProcessedMessage(aggregated, pm.updatedContext)
+              idle(registry, activeTasks - convId)
+
+            case Some(stepId) =>
+              ctx.log.info(s"Step '$stepId' completed for conversation $convId")
+
+              val cleanedMap = lastUserIdOpt match
+                case Some(uid) => state.msgIdToStep - uid
+                case None      => state.msgIdToStep
+
+              val updatedState = state.copy(
+                context = pm.updatedContext,
+                results = state.results + (stepId -> pm.message),
+                completed = state.completed + stepId,
+                inProgress = state.inProgress - stepId,
+                msgIdToStep = cleanedMap
+              )
+
+              // If all steps done and nothing in progress, evaluate satisfaction
+              val allSteps = updatedState.plan.steps.map(_.id).toSet
+              val doneNow = updatedState.completed == allSteps && updatedState.inProgress.isEmpty
+
+              if doneNow then
+                if isSatisfactory(updatedState) || updatedState.attempts >= (updatedState.maxAttempts - 1) then
+                  // Aggregate and reply
+                  val aggregated = aggregateResults(updatedState)
+                  updatedState.replyTo ! ProcessedMessage(aggregated, updatedState.context)
+                  idle(registry, activeTasks - convId)
+                else
+                  // Not satisfactory, attempt refinement: re-run last step with refinement hint
+                  val lastStepOpt = updatedState.plan.steps.lastOption
+                  lastStepOpt match
+                    case Some(lastStep) =>
+                      val refinedState = updatedState.copy(
+                        attempts = updatedState.attempts + 1,
+                        completed = updatedState.completed - lastStep.id,
+                        results = updatedState.results - lastStep.id,
+                        // Remove any stale mappings for this step id
+                        msgIdToStep = updatedState.msgIdToStep.filterNot { case (_, sid) => sid == lastStep.id }
+                      )
+                      val stateAfterDispatch = dispatchSpecificStep(convId, refinedState, lastStep, registry, refinement = true)
+                      coordinating(registry, activeTasks + (convId -> stateAfterDispatch))
+                    case None =>
+                      // No steps? Return empty aggregation
+                      val aggregated = aggregateResults(updatedState)
+                      updatedState.replyTo ! ProcessedMessage(aggregated, updatedState.context)
+                      idle(registry, activeTasks - convId)
+              else
+                // Schedule further ready steps if any
+                val nextState = dispatchReadySteps(convId, updatedState, registry)
+                coordinating(registry, activeTasks + (convId -> nextState))
 
       case failed: ProcessingFailed =>
-        ctx.log.info(s"Step failed for ${failed.messageId}")
-        val (plan, originalReplyTo) = activeTasks(failed.messageId)
-        originalReplyTo ! failed
-        idle(registry, activeTasks - failed.messageId)
+        // Correlate failure using messageId -> stepId map across conversations
+        val ownerOpt: Option[(String, TaskState)] =
+          activeTasks.collectFirst {
+            case (cid, st) if st.msgIdToStep.contains(failed.messageId) => (cid, st)
+          }
+
+        ownerOpt match
+          case None =>
+            ctx.log.warn(s"Uncorrelated ProcessingFailed for messageId=${failed.messageId}: ${failed.error}")
+            // If we cannot correlate, fail the first active task (fallback)
+            activeTasks.headOption match
+              case Some((cid, st)) =>
+                st.replyTo ! failed
+                idle(registry, activeTasks - cid)
+              case None =>
+                idle(registry, activeTasks)
+
+          case Some((convId, state)) =>
+            withLogging(ctx, convId):
+              val stepId = state.msgIdToStep(failed.messageId)
+              ctx.log.warn(s"Step '$stepId' failed for conversation $convId: ${failed.error}")
+
+              // On failure, if we still have attempts left, try to re-run this step with refinement
+              if state.attempts < (state.maxAttempts - 1) then
+                val refinedState = state.copy(
+                  attempts = state.attempts + 1,
+                  inProgress = state.inProgress - stepId,
+                  completed = state.completed - stepId,
+                  results = state.results - stepId,
+                  msgIdToStep = state.msgIdToStep - failed.messageId
+                )
+                val step = refinedState.plan.byId(stepId)
+                val afterDispatch = dispatchSpecificStep(convId, refinedState, step, registry, refinement = true)
+                coordinating(registry, activeTasks + (convId -> afterDispatch))
+              else
+                // Exhausted attempts - fail the whole conversation
+                state.replyTo ! failed
+                idle(registry, activeTasks - convId)
 
       case Stop =>
         Behaviors.stopped
 
-      case _ =>
+      case other =>
+        ctx.log.debug(s"Ignoring message in coordinating: $other")
         Behaviors.same
 
+  // Simple heuristic DAG constructor from a free-form task
   private def decomposeTask(task: String): TaskPlan =
-    if task.toLowerCase.contains("data") && task.toLowerCase.contains("visualize") then
+    val lower = task.toLowerCase
+    if lower.contains("data") && lower.contains("visualize") then
+      // Two-step DAG: extract -> visualize
       TaskPlan(Seq(
-        TaskStep("sql-agent", "Extract data", Seq.empty),
-        TaskStep("viz-agent", "Create visualization", Seq("sql-agent"))
+        TaskStep(id = "sql", agentCapability = "sql-agent", instruction = "Extract data", dependencies = Seq.empty),
+        TaskStep(id = "viz", agentCapability = "viz-agent", instruction = "Create visualization", dependencies = Seq("sql"))
       ))
     else
-      TaskPlan(Seq(TaskStep("sql-agent", task, Seq.empty)))
+      // Single step plan to a default capability name
+      TaskPlan(Seq(
+        TaskStep(id = "main", agentCapability = "sql-agent", instruction = task, dependencies = Seq.empty)
+      ))
 
-  private def executePlan(
-    plan: TaskPlan,
-    context: ConversationContext,
+  // Decide if the final result is satisfactory
+  private def isSatisfactory(state: TaskState): Boolean =
+    state.plan.steps.lastOption.flatMap(s => state.results.get(s.id)).exists: m =>
+      val mdOk = m.content.metadata.get("satisfied").exists(_.equalsIgnoreCase("true"))
+      val textOk = m.content.text.toLowerCase.contains("[done]")
+      mdOk || textOk
+
+  // Build a final aggregated message across all steps (topological order)
+  private def aggregateResults(state: TaskState): Message =
+    val parts =
+      state.plan.steps.flatMap: s =>
+        state.results.get(s.id).map: m =>
+          val tag = s"[${s.id}]"
+          s"$tag ${m.content.text}"
+    val text =
+      if parts.nonEmpty then parts.mkString("\n\n")
+      else "No results produced."
+    Message(
+      role = MessageRole.Assistant,
+      content = MessageContent(text),
+      conversationId = state.context.id,
+      agentId = Some("coordinator")
+    )
+
+  // Dispatch all ready steps (dependencies satisfied and not yet started/completed)
+  private def dispatchReadySteps(
+    convId: String,
+    state: TaskState,
     registry: AgentRegistry
-  )(using ctx: ActorContext[Command], ec: ExecutionContext): Unit =
+  )(using ctx: ActorContext[Command], ec: ExecutionContext): TaskState =
+    val completedSet = state.completed
+    val inProg = state.inProgress
+    val ready = state.plan.steps.filter { s =>
+      !completedSet.contains(s.id) &&
+      !inProg.contains(s.id) &&
+      s.dependencies.forall(dep => completedSet.contains(dep))
+    }
 
-    plan.steps.headOption.foreach: step =>
-      ctx.pipeToSelf(registry.findAgent(step.agentCapability)):
-        case Success(Some(agentRef)) =>
-          val msg = Message(
-            role = MessageRole.User,
-            content = MessageContent(step.instruction),
-            conversationId = context.id
-          )
-          val replyTo = ctx.self.asInstanceOf[ActorRef[Any]]
-          agentRef ! ProcessMessage(msg, context, replyTo)
-          NoOp
-        case Success(None) =>
-          ProcessingFailed(s"Agent ${step.agentCapability} not found", context.id)
-        case Failure(ex) =>
-          ProcessingFailed(ex.getMessage, context.id)
+    ready.foldLeft(state) { (acc, step) =>
+      dispatchSpecificStep(convId, acc, step, registry, refinement = false)
+    }
+
+  // Dispatch a specific step with optional refinement instruction
+  private def dispatchSpecificStep(
+    convId: String,
+    state: TaskState,
+    step: TaskStep,
+    registry: AgentRegistry,
+    refinement: Boolean
+  )(using ctx: ActorContext[Command], ec: ExecutionContext): TaskState =
+    val depsContextText =
+      if step.dependencies.nonEmpty then
+        step.dependencies.flatMap(state.results.get).zip(step.dependencies).map { case (msg, depId) =>
+          val who = msg.agentId.getOrElse("agent")
+          s"- [$depId][$who]: ${msg.content.text}"
+        }.mkString("\n")
+      else ""
+
+    val refinementHint =
+      if refinement then s"\n\nRefine and improve the previous result. The last attempt was not satisfactory."
+      else ""
+
+    val fullInstruction =
+      if depsContextText.nonEmpty then
+        s"${step.instruction}$refinementHint\n\nContext from dependencies:\n$depsContextText"
+      else
+        s"${step.instruction}$refinementHint"
+
+    val userMsg = Message(
+      role = MessageRole.User,
+      content = MessageContent(
+        text = fullInstruction,
+        metadata = Map(
+          "stepId" -> step.id,
+          "refinement" -> refinement.toString
+        )
+      ),
+      conversationId = state.context.id
+    )
+
+    // Resolve agent and send the message; correlate failures to this user message id
+    ctx.pipeToSelf(registry.findAgent(step.agentCapability)):
+      case Success(Some(agentRef)) =>
+        agentRef ! ProcessMessage(userMsg, state.context, ctx.self.asInstanceOf[ActorRef[Any]])
+        NoOp
+      case Success(None) =>
+        ProcessingFailed(s"Agent '${step.agentCapability}' not found", userMsg.id)
+      case Failure(ex) =>
+        ProcessingFailed(ex.getMessage, userMsg.id)
+
+    state.copy(
+      inProgress = state.inProgress + step.id,
+      msgIdToStep = state.msgIdToStep + (userMsg.id -> step.id)
+    )
