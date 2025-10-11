@@ -19,17 +19,17 @@ object CoordinatorAgent:
 
   private def idle(
     registry: AgentRegistry,
-    activeTasks: Map[String, TaskPlan]
+    activeTasks: Map[String, (TaskPlan, ActorRef[Response])]
   )(using ctx: ActorContext[Command], ec: ExecutionContext): Behavior[Command] =
-    
+
     Behaviors.receiveMessage:
       case ProcessMessage(message, context, replyTo) =>
         ctx.log.info(s"Coordinating task for conversation ${context.id}")
-        
+
         val plan = decomposeTask(message.content.text)
-        executePlan(plan, context, replyTo, registry)
-        
-        coordinating(registry, activeTasks + (context.id -> plan))
+        executePlan(plan, context, registry)
+
+        coordinating(registry, activeTasks + (context.id -> (plan, replyTo)))
 
       case Stop =>
         Behaviors.stopped
@@ -39,12 +39,20 @@ object CoordinatorAgent:
 
   private def coordinating(
     registry: AgentRegistry,
-    activeTasks: Map[String, TaskPlan]
+    activeTasks: Map[String, (TaskPlan, ActorRef[Response])]
   )(using ctx: ActorContext[Command], ec: ExecutionContext): Behavior[Command] =
     Behaviors.receiveMessage:
       case msg: ProcessedMessage =>
         ctx.log.info(s"Step completed for ${msg.updatedContext.id}")
+        val (plan, originalReplyTo) = activeTasks(msg.updatedContext.id)
+        originalReplyTo ! msg
         idle(registry, activeTasks - msg.updatedContext.id)
+
+      case failed: ProcessingFailed =>
+        ctx.log.info(s"Step failed for ${failed.messageId}")
+        val (plan, originalReplyTo) = activeTasks(failed.messageId)
+        originalReplyTo ! failed
+        idle(registry, activeTasks - failed.messageId)
 
       case Stop =>
         Behaviors.stopped
@@ -64,10 +72,9 @@ object CoordinatorAgent:
   private def executePlan(
     plan: TaskPlan,
     context: ConversationContext,
-    replyTo: ActorRef[Response],
     registry: AgentRegistry
   )(using ctx: ActorContext[Command], ec: ExecutionContext): Unit =
-    
+
     plan.steps.headOption.foreach: step =>
       ctx.pipeToSelf(registry.findAgent(step.agentCapability)):
         case Success(Some(agentRef)) =>
@@ -76,11 +83,10 @@ object CoordinatorAgent:
             content = MessageContent(step.instruction),
             conversationId = context.id
           )
+          val replyTo = ctx.self.asInstanceOf[ActorRef[Any]]
           agentRef ! ProcessMessage(msg, context, replyTo)
-          Stop // Send any Command to satisfy type
+          NoOp
         case Success(None) =>
-          replyTo ! ProcessingFailed(s"Agent ${step.agentCapability} not found", context.id)
-          Stop
+          ProcessingFailed(s"Agent ${step.agentCapability} not found", context.id)
         case Failure(ex) =>
-          replyTo ! ProcessingFailed(ex.getMessage, context.id)
-          Stop
+          ProcessingFailed(ex.getMessage, context.id)

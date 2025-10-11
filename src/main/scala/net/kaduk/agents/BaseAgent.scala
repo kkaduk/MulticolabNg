@@ -11,22 +11,23 @@ object BaseAgent:
   case class ProcessMessage(
     message: Message,
     context: ConversationContext,
-    replyTo: ActorRef[Response]
+    replyTo: ActorRef[Any]
   ) extends Command
-  
+
   case class StreamMessage(
     message: Message,
     context: ConversationContext,
-    replyTo: ActorRef[StreamResponse]
+    replyTo: ActorRef[Any]
   ) extends Command
-  
+
   case object Stop extends Command
   case object GetStatus extends Command
-  
+  case object NoOp extends Command
+
   sealed trait Response
-  case class ProcessedMessage(message: Message, updatedContext: ConversationContext) extends Response
-  case class ProcessingFailed(error: String, messageId: String) extends Response
-  case class AgentStatusResponse(status: String, load: Int) extends Response
+  case class ProcessedMessage(message: Message, updatedContext: ConversationContext) extends Response with Command
+  case class ProcessingFailed(error: String, messageId: String) extends Response with Command
+  case class AgentStatusResponse(status: String, load: Int) extends Response with Command
   
   sealed trait StreamResponse
   case class StreamChunk(content: String, messageId: String) extends StreamResponse
