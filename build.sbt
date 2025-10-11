@@ -67,6 +67,7 @@ lazy val root = project
       "org.apache.pekko" %% "pekko-protobuf-v3" % pekkoVersion
     ),
     
+    run / connectInput := true,
     fork := true,
     run / javaOptions ++= Seq(
       "-Xmx2G",

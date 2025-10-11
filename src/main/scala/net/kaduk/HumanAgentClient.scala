@@ -57,12 +57,21 @@ object HumanAgentClient {
       return
     }
 
-    val scanner = new Scanner(System.in)
-    while (scanner.hasNextLine()) {
-      println("Enter a question for HumanAgent: ")
-      val input = scanner.nextLine()
-      testAgentUser(input)
+    // Interactive loop using StdIn; prints a visible prompt and banner; Ctrl+D to exit
+    println("HumanAgentClient ready. Type your message and press Enter. Ctrl+D to exit.")
+    var continue = true
+    while (continue) {
+      print("> ")
+      Console.out.flush()
+      val line = scala.io.StdIn.readLine()
+      if (line == null) {
+        continue = false
+      } else {
+        val input = line.trim
+        if (input.nonEmpty) testAgentUser(input)
+      }
     }
+    sys.terminate()
 
   }
 
