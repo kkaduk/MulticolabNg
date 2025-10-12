@@ -97,6 +97,22 @@ object LLMAgent:
         ctx.log.info("Shutting down LLM agent")
         Behaviors.stopped
 
+      case NoOp =>
+        Behaviors.same
+
+      case pm: ProcessedMessage =>
+        ctx.log.debug(s"Ignoring nested ProcessedMessage in idle: $pm")
+        Behaviors.same
+
+      case pf: ProcessingFailed =>
+        ctx.log.warn(s"Ignoring nested ProcessingFailed in idle: ${pf.error}")
+        Behaviors.same
+
+      case as: AgentStatusResponse =>
+        ctx.log.debug(s"Ignoring nested AgentStatusResponse in idle")
+        Behaviors.same
+
+
   private def processing(
     capability: AgentCapability,
     provider: LLMProvider,

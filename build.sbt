@@ -1,7 +1,7 @@
 val scala3Version = "3.3.6"
-val pekkoVersion = "1.0.2"
+val pekkoVersion = "1.2.1"
 val pekkoHttpVersion = "1.2.0"
-val pekkoGrpcVersion = "1.0.2"
+val pekkoGrpcVersion = "1.1.0"
 val cequenceVersion = "1.2.0"
 
 lazy val root = project

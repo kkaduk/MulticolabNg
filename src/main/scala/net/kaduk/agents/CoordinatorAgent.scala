@@ -103,72 +103,72 @@ object CoordinatorAgent:
       case pm: ProcessedMessage =>
         val convId = pm.updatedContext.id
         withLogging(ctx, convId):
-          val state = activeTasks.getOrElse(convId,
-            return idle(registry, activeTasks) // No state, ignore and go idle
-          )
-
-          // The last user message id added just before the agent's assistant response
-          val lastUserIdOpt =
-            pm.updatedContext.messages.reverse.find(_.role == MessageRole.User).map(_.id)
-
-          val stepIdOpt = lastUserIdOpt.flatMap(state.msgIdToStep.get)
-
-          stepIdOpt match
+          val stateOpt: Option[TaskState] = activeTasks.get(convId)
+          stateOpt match
             case None =>
-              ctx.log.warn(s"Could not correlate ProcessedMessage to a step for conversation $convId")
-              // As a fallback, reply aggregated result
-              val aggregated = aggregateResults(state.copy(context = pm.updatedContext))
-              state.replyTo ! ProcessedMessage(aggregated, pm.updatedContext)
-              idle(registry, activeTasks - convId)
+              idle(registry, activeTasks) // No state, ignore and go idle
+            case Some(st) =>
+              // The last user message id added just before the agent's assistant response
+              val lastUserIdOpt =
+                pm.updatedContext.messages.reverse.find(_.role == MessageRole.User).map(_.id)
 
-            case Some(stepId) =>
-              ctx.log.info(s"Step '$stepId' completed for conversation $convId")
+              val stepIdOpt = lastUserIdOpt.flatMap(st.msgIdToStep.get)
 
-              val cleanedMap = lastUserIdOpt match
-                case Some(uid) => state.msgIdToStep - uid
-                case None      => state.msgIdToStep
-
-              val updatedState = state.copy(
-                context = pm.updatedContext,
-                results = state.results + (stepId -> pm.message),
-                completed = state.completed + stepId,
-                inProgress = state.inProgress - stepId,
-                msgIdToStep = cleanedMap
-              )
-
-              // If all steps done and nothing in progress, evaluate satisfaction
-              val allSteps = updatedState.plan.steps.map(_.id).toSet
-              val doneNow = updatedState.completed == allSteps && updatedState.inProgress.isEmpty
-
-              if doneNow then
-                if isSatisfactory(updatedState) || updatedState.attempts >= (updatedState.maxAttempts - 1) then
-                  // Aggregate and reply
-                  val aggregated = aggregateResults(updatedState)
-                  updatedState.replyTo ! ProcessedMessage(aggregated, updatedState.context)
+              stepIdOpt match
+                case None =>
+                  ctx.log.warn(s"Could not correlate ProcessedMessage to a step for conversation $convId")
+                  // As a fallback, reply aggregated result
+                  val aggregated = aggregateResults(st.copy(context = pm.updatedContext))
+                  st.replyTo ! ProcessedMessage(aggregated, pm.updatedContext)
                   idle(registry, activeTasks - convId)
-                else
-                  // Not satisfactory, attempt refinement: re-run last step with refinement hint
-                  val lastStepOpt = updatedState.plan.steps.lastOption
-                  lastStepOpt match
-                    case Some(lastStep) =>
-                      val refinedState = updatedState.copy(
-                        attempts = updatedState.attempts + 1,
-                        completed = updatedState.completed - lastStep.id,
-                        results = updatedState.results - lastStep.id,
-                        // Remove any stale mappings for this step id
-                        msgIdToStep = updatedState.msgIdToStep.filterNot { case (_, sid) => sid == lastStep.id }
-                      )
-                      val stateAfterDispatch = dispatchSpecificStep(convId, refinedState, lastStep, registry, refinement = true)
-                      coordinating(registry, activeTasks + (convId -> stateAfterDispatch))
-                    case None =>
-                      // No steps? Return empty aggregation
+
+                case Some(stepId) =>
+                  ctx.log.info(s"Step '$stepId' completed for conversation $convId")
+
+                  val cleanedMap = lastUserIdOpt match
+                    case Some(uid) => st.msgIdToStep - uid
+                    case None      => st.msgIdToStep
+
+                  val updatedState = st.copy(
+                    context = pm.updatedContext,
+                    results = st.results + (stepId -> pm.message),
+                    completed = st.completed + stepId,
+                    inProgress = st.inProgress - stepId,
+                    msgIdToStep = cleanedMap
+                  )
+
+                  // If all steps done and nothing in progress, evaluate satisfaction
+                  val allSteps = updatedState.plan.steps.map(_.id).toSet
+                  val doneNow = updatedState.completed == allSteps && updatedState.inProgress.isEmpty
+
+                  if doneNow then
+                    if isSatisfactory(updatedState) || updatedState.attempts >= (updatedState.maxAttempts - 1) then
+                      // Aggregate and reply
                       val aggregated = aggregateResults(updatedState)
                       updatedState.replyTo ! ProcessedMessage(aggregated, updatedState.context)
                       idle(registry, activeTasks - convId)
-              else
-                // Schedule further ready steps if any
-                val nextState = dispatchReadySteps(convId, updatedState, registry)
-                coordinating(registry, activeTasks + (convId -> nextState))
+                    else
+                      // Not satisfactory, attempt refinement: re-run last step with refinement hint
+                      updatedState.plan.steps.lastOption match
+                        case Some(lastStep) =>
+                          val refinedState = updatedState.copy(
+                            attempts = updatedState.attempts + 1,
+                            completed = updatedState.completed - lastStep.id,
+                            results = updatedState.results - lastStep.id,
+                            // Remove any stale mappings for this step id
+                            msgIdToStep = updatedState.msgIdToStep.filterNot { case (_, sid) => sid == lastStep.id }
+                          )
+                          val afterDispatch = dispatchSpecificStep(convId, refinedState, lastStep, registry, refinement = true)
+                          coordinating(registry, activeTasks + (convId -> afterDispatch))
+                        case None =>
+                          // No steps? Return empty aggregation
+                          val aggregated = aggregateResults(updatedState)
+                          updatedState.replyTo ! ProcessedMessage(aggregated, updatedState.context)
+                          idle(registry, activeTasks - convId)
+                  else
+                    // Schedule further ready steps if any
+                    val nextState = dispatchReadySteps(convId, updatedState, registry)
+                    coordinating(registry, activeTasks + (convId -> nextState))
 
       case failed: ProcessingFailed =>
         // Correlate failure using messageId -> stepId map across conversations

@@ -14,10 +14,12 @@ class OpenAIProvider(
   model: String = "gpt-4"
 )(using system: ActorSystem[?], ec: ExecutionContext) extends LLMProvider:
 
-  // Create implicit materializer for the service
-  private given akka.actor.ActorSystem = 
+  // Create implicit materializer for the service (Akka classic needed by cequence client)
+  private given akka.actor.ActorSystem =
     akka.actor.ActorSystem("openai-compat", system.settings.config)
-  
+  private given akka.stream.Materializer =
+    akka.stream.SystemMaterializer(summon[akka.actor.ActorSystem]).materializer
+
   private val service = OpenAIServiceFactory(apiKey)
   
   override val name: String = "openai"
@@ -57,7 +59,5 @@ class OpenAIProvider(
         case MessageRole.System => SystemMessage(msg.content.text)
         case MessageRole.Agent => UserMessage(s"[Agent ${msg.agentId.getOrElse("unknown")}]: ${msg.content.text}")
 
-  override def close(): Future[Unit] = 
+  override def close(): Future[Unit] =
     Future.successful(service.close())
-    akka.actor.ActorSystem.getClass // Keep reference
-    Future.unit
