@@ -23,7 +23,7 @@ object LLMAgent:
     Behaviors.setup { ctx =>
       given ActorContext[Command] = ctx
       // Register capability and skills on startup
-      registry.register(ctx.self, capability, skills)
+      registry.register(ctx.self, capability)
       // Start in idle behavior
       idle(capability, provider, registry, skills, Map.empty)
     }
@@ -109,7 +109,6 @@ object LLMAgent:
       case Stop =>
         ctx.log.info("Shutting down LLM agent")
         registry.deregister(ctx.self, capability)
-        if skills.nonEmpty then registry.deregisterSkills(ctx.self, skills)
         Behaviors.stopped
 
       case NoOp =>
@@ -139,8 +138,7 @@ object LLMAgent:
     Behaviors.receiveMessage[Command] {
       case Stop =>
         registry.deregister(ctx.self, capability)
-        if skills.nonEmpty then registry.deregisterSkills(ctx.self, skills)
-        ctx.log.debug(s"Deregistered agent and skills")
+        ctx.log.debug(s"Deregistered agent")
         Behaviors.stopped
 
       case _ =>

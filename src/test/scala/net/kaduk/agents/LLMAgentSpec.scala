@@ -4,6 +4,7 @@ import org.apache.pekko.actor.testkit.typed.scaladsl.ScalaTestWithActorTestKit
 import org.scalatest.wordspec.AnyWordSpecLike
 import net.kaduk.domain.*
 import net.kaduk.infrastructure.llm.LLMProvider
+import net.kaduk.infrastructure.registry.AgentRegistry
 import org.apache.pekko.stream.scaladsl.Source
 import org.apache.pekko.NotUsed
 import scala.concurrent.Future
@@ -33,7 +34,8 @@ class LLMAgentSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike:
       )
       
       val provider = MockLLMProvider()
-      val agent = spawn(LLMAgent(capability, provider))
+      val registry = AgentRegistry()(using system, summon[scala.concurrent.ExecutionContext])
+      val agent = spawn(LLMAgent(capability, provider, registry))
       val probe = createTestProbe[BaseAgent.Response]()
       
       val message = Message(
