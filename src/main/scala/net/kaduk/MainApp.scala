@@ -49,7 +49,7 @@ object MainApp:
             config = Map("systemPrompt" -> agentConfig.systemPrompt)
           )
 
-          val agentRef = ctx.spawn(LLMAgent(capability, provider, registry, skills), actorName)
+          val agentRef = ctx.spawn(LLMAgent(capability, provider, registry), actorName)
           
 
       

@@ -17,22 +17,20 @@ object LLMAgent:
   def apply(
     capability: AgentCapability,
     provider: LLMProvider,
-    registry: AgentRegistry,
-    skills: Set[String] = Set.empty
+    registry: AgentRegistry
   )(using ec: ExecutionContext): Behavior[Command] =
     Behaviors.setup { ctx =>
       given ActorContext[Command] = ctx
       // Register capability and skills on startup
       registry.register(ctx.self, capability)
       // Start in idle behavior
-      idle(capability, provider, registry, skills, Map.empty)
+      idle(capability, provider, registry, Map.empty)
     }
 
   private def idle(
     capability: AgentCapability,
     provider: LLMProvider,
     registry: AgentRegistry,
-    skills: Set[String],
     conversations: Map[String, ConversationContext]
   )(using ctx: ActorContext[Command], ec: ExecutionContext): Behavior[Command] =
     Behaviors.receiveMessage[Command] {
@@ -62,7 +60,7 @@ object LLMAgent:
               Stop
           }
 
-          processing(capability, provider, registry, skills, conversations + (context.id -> context), replyTo)
+          processing(capability, provider, registry, conversations + (context.id -> context), replyTo)
         }
 
       case StreamMessage(message, context, replyTo) =>
@@ -99,7 +97,7 @@ object LLMAgent:
             replyTo ! StreamChunk(token.content, token.messageId)
           }
 
-          processing(capability, provider, registry, skills, conversations + (context.id -> context), replyTo)
+          processing(capability, provider, registry, conversations + (context.id -> context), replyTo)
         }
 
       case GetStatus =>
@@ -131,7 +129,6 @@ object LLMAgent:
     capability: AgentCapability,
     provider: LLMProvider,
     registry: AgentRegistry,
-    skills: Set[String],
     conversations: Map[String, ConversationContext],
     pendingReply: ActorRef[?]
   )(using ctx: ActorContext[Command], ec: ExecutionContext): Behavior[Command] =
