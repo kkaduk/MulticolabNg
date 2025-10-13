@@ -37,18 +37,19 @@ object MainApp:
             case "vertex" => VertexProvider(providerConfig.apiKey, "us-central1", providerConfig.model)
             case _ => throw new IllegalArgumentException(s"Unknown provider: ${agentConfig.provider}")
           
-          val resolvedName = agentConfig.capability.getOrElse(name)
+          val actorName = agentConfig.name.getOrElse(name)
+          val capabilityName = agentConfig.capability.getOrElse(name)
           val skills = if agentConfig.skills.nonEmpty then agentConfig.skills else Set("text-generation")
 
           val capability = AgentCapability(
-            name = resolvedName,
+            name = capabilityName,
             agentType = AgentType.LLM,
             skills = skills,
             provider = agentConfig.provider,
             config = Map("systemPrompt" -> agentConfig.systemPrompt)
           )
 
-          val agentRef = ctx.spawn(LLMAgent(capability, provider, registry, skills), resolvedName)
+          val agentRef = ctx.spawn(LLMAgent(capability, provider, registry, skills), actorName)
           
 
       

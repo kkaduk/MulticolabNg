@@ -33,6 +33,13 @@ class AgentRegistry(using system: ActorSystem[?], ec: ExecutionContext):
     def skillKey(skill: String): ServiceKey[BaseAgent.Command] =
       ServiceKey[BaseAgent.Command](s"skill:${norm(skill)}")
 
+  // ---------------------- Sanitization helpers ----------------------
+  private def sanitizeForActorName(id: String): String =
+    val allowed: Set[Char] = Set('-', '_', '.', '*', '$', '+', ':', '@', '&', '=', ',', '!', '~', '\'', ';')
+    id.map { ch =>
+      if ch.isLetterOrDigit || allowed.contains(ch) then ch else '-'
+    }
+
   // ---------------------- Local cache (optional) ----------------------
   // Indices keyed by normalized id (e.g., "ner" or "planner") -> Set[ActorRef]
   private val capIndex   = TrieMap.empty[String, Set[ActorRef[BaseAgent.Command]]]
@@ -50,7 +57,8 @@ class AgentRegistry(using system: ActorSystem[?], ec: ExecutionContext):
     if useLocalCache then
       val subsMap = if isSkill then skillSubscribers else capSubscribers
       if !subsMap.contains(id) then
-        val name = s"agent-registry-subscriber-${if isSkill then "skill" else "cap"}-${id}-${UUID.randomUUID().toString.take(8)}"
+        val safeId = sanitizeForActorName(id)
+        val name = s"agent-registry-subscriber-${if isSkill then "skill" else "cap"}-${safeId}-${UUID.randomUUID().toString.take(8)}"
         val subscriber: Behavior[Receptionist.Listing] = Behaviors.setup { _ =>
           Behaviors.receiveMessage { listing =>
             val instances = listing.serviceInstances(key)
