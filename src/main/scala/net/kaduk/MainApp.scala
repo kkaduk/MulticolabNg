@@ -45,8 +45,9 @@ object MainApp:
             config = Map("systemPrompt" -> agentConfig.systemPrompt)
           )
           
-          val agentRef = ctx.spawn(LLMAgent(capability, provider), name)
-          registry.register(agentRef, capability)
+          val agentRef = ctx.spawn(LLMAgent(capability, provider, registry, capability.skills), name)
+          
+
       
       // Spawn coordinator
       val coordinatorRef = ctx.spawn(CoordinatorAgent(registry), "coordinator")
