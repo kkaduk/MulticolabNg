@@ -79,7 +79,7 @@ object CoordinatorAgent:
         withLogging(ctx, context.id):
           ctx.log.info(s"Coordinating task for conversation ${context.id}")
 
-          val plan = decomposeTask(message.content.text, registry)
+          val plan = decomposeTask(message.content.text, registry, ctx)
           val maxLoops = context.metadata
             .get("maxLoops")
             .flatMap(s => Try(s.toInt).toOption)
@@ -273,12 +273,13 @@ object CoordinatorAgent:
   // 2) Receive agent references (validated by registry.findAgent)
   // 3) Plan task decomposition (build DAG)
   // 4) Distribution and consolidation are handled by Coordinator via dispatchReadySteps/aggregateResults
-  private def decomposeTask(task: String, registry: AgentRegistry): TaskPlan =
+  private def decomposeTask(task: String, registry: AgentRegistry, ctx: ActorContext[Command]): TaskPlan =
 
     // ---- Heuristic skill inference from task text ----
     def norm(s: String) = s.trim.toLowerCase
     val textL = norm(task)
 
+    ctx.log.debug(s"Decomposing the task.....")
     // map observable intents/keywords to skills
     val keywordSkills: Seq[(String, String)] = Seq(
       "plan" -> "planning",

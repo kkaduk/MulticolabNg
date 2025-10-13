@@ -13,7 +13,9 @@ case class LLMProviderConfig(
 case class AgentConfig(
   agentType: String,
   provider: String,
-  systemPrompt: String
+  systemPrompt: String,
+  skills: Set[String] = Set.empty,
+  capability: Option[String] = None
 )
 
 case class AppConfig(
@@ -48,7 +50,9 @@ object AppConfig:
         key -> AgentConfig(
           agentType = agentConfig.getString("type"),
           provider = if agentConfig.hasPath("provider") then agentConfig.getString("provider") else "",
-          systemPrompt = if agentConfig.hasPath("system-prompt") then agentConfig.getString("system-prompt") else ""
+          systemPrompt = if agentConfig.hasPath("system-prompt") then agentConfig.getString("system-prompt") else "",
+          skills = if agentConfig.hasPath("skills") then agentConfig.getStringList("skills").asScala.toSet else Set.empty,
+          capability = if agentConfig.hasPath("capability") then Some(agentConfig.getString("capability")) else None
         )
       .toMap
     

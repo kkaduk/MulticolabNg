@@ -140,6 +140,7 @@ object LLMAgent:
       case Stop =>
         registry.deregister(ctx.self, capability)
         if skills.nonEmpty then registry.deregisterSkills(ctx.self, skills)
+        ctx.log.debug(s"Deregistered agent and skills")
         Behaviors.stopped
 
       case _ =>
