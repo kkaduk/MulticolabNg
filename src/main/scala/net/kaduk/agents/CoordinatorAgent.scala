@@ -69,7 +69,7 @@ object CoordinatorAgent:
         withLogging(ctx, context.id):
           ctx.log.info(s"Coordinating task for conversation ${context.id}")
 
-          val plan = decomposeTask(message.content.text)
+          val plan = decomposeTask(message.content.text, registry)
           val maxLoops = context.metadata
             .get("maxLoops")
             .flatMap(s => Try(s.toInt).toOption)
@@ -217,20 +217,63 @@ object CoordinatorAgent:
         ctx.log.debug(s"Ignoring message in coordinating: $other")
         Behaviors.same
 
-  // Simple heuristic DAG constructor from a free-form task
-  private def decomposeTask(task: String): TaskPlan =
-    val lower = task.toLowerCase
-    if lower.contains("data") && lower.contains("visualize") then
-      // Two-step DAG: extract -> visualize
-      TaskPlan(Seq(
-        TaskStep(id = "sql", agentCapability = "sql-agent", instruction = "Extract data", dependencies = Seq.empty),
-        TaskStep(id = "viz", agentCapability = "viz-agent", instruction = "Create visualization", dependencies = Seq("sql"))
-      ))
-    else
-      // Single step plan to a default capability name
-      TaskPlan(Seq(
-        TaskStep(id = "main", agentCapability = "sql-agent", instruction = task, dependencies = Seq.empty)
-      ))
+  // Planner: consult receptionist for available agents by capability name and inferred skills,
+  // then construct a DAG plan. Steps of the approach:
+  // 1) Ask receptionist about skills suitable for task (heuristic inference + capability availability check)
+  // 2) Receive agent references (validated by registry.findAgent)
+  // 3) Plan task decomposition (build DAG)
+  // 4) Distribution and consolidation are handled by Coordinator via dispatchReadySteps/aggregateResults
+  private def decomposeTask(task: String, registry: AgentRegistry): TaskPlan =
+    import scala.concurrent.Await
+    import scala.concurrent.duration.*
+
+    def has(s: String) = task.toLowerCase.contains(s)
+
+    // 1) Infer skills from task text
+    val inferredSkills = {
+      val buf = scala.collection.mutable.LinkedHashSet.empty[String]
+      if has("sql") || has("query") || has("database") || has("extract") || has("data") then buf += "sql"
+      if has("visualiz") || has("chart") || has("plot") || has("graph") then buf += "visualization"
+      if buf.isEmpty then buf += "text-generation"
+      buf.toSet
+    }
+
+    // 2) Map skills to preferred capabilities and verify presence via receptionist
+    val preferredCaps = Map(
+      "sql" -> "sql-agent",
+      "visualization" -> "viz-agent",
+      "text-generation" -> "sql-agent" // default generalist
+    )
+
+    def capAvailable(cap: String): Boolean =
+      try Await.result(registry.findAgent(cap), 250.millis).isDefined
+      catch case _: Throwable => false
+
+    val availableCaps = inferredSkills.toSeq
+      .flatMap(skill => preferredCaps.get(skill).toSeq)
+      .filter(capAvailable)
+      .distinct
+
+    // Ensure at least one capability
+    val caps =
+      if availableCaps.nonEmpty then availableCaps
+      else preferredCaps.values.toSeq.filter(capAvailable) match
+        case seq if seq.nonEmpty => seq.distinct
+        case _ => Seq("sql-agent") // final fallback
+
+    // 3) Build DAG plan based on available capabilities
+    val steps =
+      if caps.contains("sql-agent") && caps.contains("viz-agent") then
+        Seq(
+          TaskStep(id = "sql", agentCapability = "sql-agent", instruction = "Extract or transform the required data for the task", dependencies = Seq.empty),
+          TaskStep(id = "viz", agentCapability = "viz-agent", instruction = "Create an appropriate visualization based on the extracted data", dependencies = Seq("sql"))
+        )
+      else
+        Seq(
+          TaskStep(id = "main", agentCapability = caps.headOption.getOrElse("sql-agent"), instruction = task, dependencies = Seq.empty)
+        )
+
+    TaskPlan(steps)
 
   // Decide if the final result is satisfactory
   private def isSatisfactory(state: TaskState): Boolean =
