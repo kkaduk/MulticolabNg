@@ -53,11 +53,11 @@ object LLMAgent:
               )
               val updatedContext = context.addMessage(message).addMessage(responseMsg)
               replyTo ! ProcessedMessage(responseMsg, updatedContext)
-              Stop // Return Command to transition
+              NoOp // Return to idle via processing handler
             case Failure(ex) =>
               ctx.log.error(s"LLM completion failed", ex)
               replyTo ! ProcessingFailed(ex.getMessage, message.id)
-              Stop
+              NoOp
           }
 
           processing(capability, provider, registry, conversations + (context.id -> context), replyTo)
@@ -86,10 +86,10 @@ object LLMAgent:
               )
               val updatedContext = context.addMessage(message).addMessage(responseMsg)
               replyTo ! StreamComplete(responseMsg)
-              Stop
+              NoOp
             case Failure(ex) =>
               replyTo ! StreamError(ex.getMessage)
-              Stop
+              NoOp
           }
 
           // Stream tokens to replyTo
@@ -137,6 +137,9 @@ object LLMAgent:
         registry.deregister(ctx.self, capability)
         ctx.log.debug(s"Deregistered agent")
         Behaviors.stopped
+
+      case NoOp =>
+        idle(capability, provider, registry, conversations)
 
       case _ =>
         ctx.log.warn("Ignoring message while processing")
