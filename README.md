@@ -277,23 +277,24 @@ src/
 * Support for **tool-aware prompting** and dynamic **skill chaining**.
 * **Multi-conversation contexts** (parallel DAG execution).
 
+# 🚀 How to Run the Project (Local Development)
 
-🚀 How to Run the Project (Local Development)
+## 🧩 Prerequisites
 
-🧩 Prerequisites
-	•	Scala 3.x
-	•	sbt ≥ 1.9.x
-	•	Java 21
-	•	Internet connection (for LLM API calls)
-	•	API keys for at least one provider (OpenAI, Vertex AI, Anthropic, etc.)
+* **Scala 3.x**
+* **sbt ≥ 1.9.x**
+* **Java 21**
+* Internet connection (for LLM API calls)
+* API keys for at least one provider (OpenAI, Vertex AI, Anthropic, etc.)
 
-⸻
+---
 
-🧠 Step 1 — Set up Environment Variables
+## 🧠 Step 1 — Set up Environment Variables
 
 Before running, export the required API keys for the LLM providers you plan to use.
 You can set multiple — the system will select the appropriate one based on configuration.
 
+```bash
 # ==== OpenAI ====
 export OPENAI_API_KEY=sk-xxx
 export OPENAI_SCALA_CLIENT_API_KEY=xxx
@@ -305,75 +306,89 @@ export VERTEX_API_KEY=xxxxx
 
 # ==== Anthropic (Claude) ====
 export ANTHROPIC_API_KEY=xxxxx
+```
 
-💡 You can add these lines to your ~/.bashrc, ~/.zshrc, or a dedicated .env file.
+> 💡 You can add these lines to your `~/.bashrc`, `~/.zshrc`, or a dedicated `.env` file.
 
-⸻
+---
 
-🧰 Step 2 — Start the Coordinator / Multi-Agent Platform
+## 🧰 Step 2 — Start the Coordinator / Multi-Agent Platform
 
-Open your first terminal and launch the main coordination system:
+Open your **first terminal** and launch the main coordination system:
 
+```bash
 cd /path/to/MulticolabNg
 sbt "runMain net.kaduk.MainApp"
+```
 
-This starts the CoordinatorAgent, AgentRegistry, and all core infrastructure components (Pekko typed actor system, Receptionist, etc.).
+This starts the **CoordinatorAgent**, **AgentRegistry**, and all core infrastructure components (Pekko typed actor system, Receptionist, etc.).
 
-Expected log output:
+**Expected log output:**
 
+```
 [INFO] AgentRegistry started
 [INFO] CoordinatorAgent up and listening...
 [INFO] Waiting for incoming HumanAgentClient connections...
+```
 
+---
 
-⸻
+## 💬 Step 3 — Start the HumanAgentClient
 
-💬 Step 3 — Start the HumanAgentClient
+Open a **second terminal** and start the interactive **HumanAgentClient**, which connects via gRPC:
 
-Open a second terminal and start the interactive HumanAgentClient, which connects via gRPC:
-
+```bash
 cd /path/to/MulticolabNg
 sbt -Dgrpc.port=6060 "runMain net.kaduk.HumanAgentClient"
+```
 
-This client sends user tasks (e.g., “Summarize this report”, “Plan a data extraction pipeline”) to the CoordinatorAgent over gRPC.
+This client sends user tasks (e.g., “Summarize this report”, “Plan a data extraction pipeline”) to the `CoordinatorAgent` over gRPC.
 
-Expected output:
+**Expected output:**
 
+```
 [INFO] Connected to CoordinatorAgent on port 6060
 Type your instruction below:
 > 
+```
 
+---
 
-⸻
+## 🔁 Step 4 — Example Interactive Session
 
-🔁 Step 4 — Example Interactive Session
-
+```
 > Analyze the European AI Act and summarize its implications for financial compliance.
 
 [PlannerAgent]: decomposing task into 3 steps
 [WebCrawlerAgent]: gathering documents
 [SummarizerAgent]: generating summary... [done]
+
 Final Response:
 "The European AI Act establishes unified risk-based rules for AI governance in finance..."
+```
 
+---
 
-⸻
+## 🧩 Notes
 
-🧩 Notes
-	•	You can run multiple agent nodes by changing ports or running them in containers:
+* You can run multiple agent nodes by changing ports or running them in containers:
 
-sbt -Dgrpc.port=6061 "runMain net.kaduk.HumanAgentClient"
+  ```bash
+  sbt -Dgrpc.port=6061 "runMain net.kaduk.HumanAgentClient"
+  ```
 
+* Environment variables are read at startup; restarting the agent is required if keys change.
 
-	•	Environment variables are read at startup; restarting the agent is required if keys change.
-	•	For local testing, no cloud setup is needed — the framework automatically detects available LLM connectors.
+* For local testing, no cloud setup is needed — the framework automatically detects available LLM connectors.
 
-⸻
+---
 
-✅ Quick Summary
+## ✅ Quick Summary
 
-Terminal	Command	Purpose
-1	sbt "runMain net.kaduk.MainApp"	Starts main coordination platform (Registry + CoordinatorAgent)
-2	sbt -Dgrpc.port=6060 "runMain net.kaduk.HumanAgentClient"	Launches interactive human client via gRPC
-Env Vars	export OPENAI_API_KEY=... etc.	Configure credentials for selected LLM provider
+| Terminal     | Command                                                     | Purpose                                                         |
+| ------------ | ----------------------------------------------------------- | --------------------------------------------------------------- |
+| **1**        | `sbt "runMain net.kaduk.MainApp"`                           | Starts main coordination platform (Registry + CoordinatorAgent) |
+| **2**        | `sbt -Dgrpc.port=6060 "runMain net.kaduk.HumanAgentClient"` | Launches interactive human client via gRPC                      |
+| **Env Vars** | `export OPENAI_API_KEY=...` etc.                            | Configure credentials for selected LLM provider                 |
+
 
