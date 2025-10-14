@@ -237,8 +237,11 @@ object CoordinatorAgent:
                 s"Step '$stepId' failed for conversation $convId: ${failed.error}"
               )
 
-              // On failure, if we still have attempts left, try to re-run this step with refinement
-              if state.attempts < (state.maxAttempts - 1) then
+              // Non-retryable errors (e.g., agent not found) should fail fast without retries
+              if failed.error.toLowerCase.contains("not found") then
+                state.replyTo ! failed
+                idle(registry, activeTasks - convId)
+              else if state.attempts < (state.maxAttempts - 1) then
                 val refinedState = state.copy(
                   attempts = state.attempts + 1,
                   inProgress = state.inProgress - stepId,
@@ -322,8 +325,10 @@ object CoordinatorAgent:
     )
 
     // ---- Availability check using the subscription-aware AgentRegistry ----
+    // Consider a skill available only if its mapped capability is actually registered.
     def skillAvailable(sk: String): Boolean =
-      try Await.result(registry.findAgentsBySkill(sk), 250.millis).nonEmpty
+      val cap = skillToCapability.getOrElse(sk, s"${sk}-agent")
+      try Await.result(registry.findAgent(cap), 250.millis).isDefined
       catch case _: Throwable => false
 
     val availableSkills = inferredSkills.filter(skillAvailable)
