@@ -2,13 +2,14 @@
 <configuration>
   <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
     <encoder>
-      <pattern>%d{HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n</pattern>
+      <pattern>%d{HH:mm:ss.SSS} %-5level [%thread] [%X{conversationId}][%X{agentId}] %logger{36} - %msg%n</pattern>
     </encoder>
   </appender>
 
   <!-- Adjust log levels as needed -->
   <logger name="org.apache.pekko" level="INFO"/>
   <logger name="org.apache.pekko.actor" level="INFO"/>
+  <logger name="net.kaduk.agents" level="INFO"/>
 
   <root level="INFO">
     <appender-ref ref="STDOUT"/>

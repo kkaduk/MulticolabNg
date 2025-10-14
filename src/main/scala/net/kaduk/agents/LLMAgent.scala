@@ -37,6 +37,9 @@ object LLMAgent:
       case ProcessMessage(message, context, replyTo) =>
         withLogging[Command](ctx, context.id) {
           ctx.log.info(s"Processing message ${message.id} from conversation ${context.id}")
+          val stepId = message.content.metadata.getOrElse("stepId", "n/a")
+          val refinement = message.content.metadata.getOrElse("refinement", "false")
+          ctx.log.info(s"[${capability.name}] Starting stepId=$stepId refinement=$refinement msgId=${message.id}")
 
           ctx.pipeToSelf(
             provider.completion(
@@ -52,10 +55,11 @@ object LLMAgent:
                 agentId = Some(ctx.self.path.name)
               )
               val updatedContext = context.addMessage(message).addMessage(responseMsg)
+              ctx.log.info(s"[${capability.name}] Completed stepId=$stepId responseMsgId=${responseMsg.id} len=${response.length}")
               replyTo ! ProcessedMessage(responseMsg, updatedContext)
               NoOp // Return to idle via processing handler
             case Failure(ex) =>
-              ctx.log.error(s"LLM completion failed", ex)
+              ctx.log.error(s"[${capability.name}] LLM completion failed for stepId=$stepId", ex)
               replyTo ! ProcessingFailed(ex.getMessage, message.id)
               NoOp
           }
@@ -66,6 +70,9 @@ object LLMAgent:
       case StreamMessage(message, context, replyTo) =>
         withLogging[Command](ctx, context.id) {
           ctx.log.info(s"Streaming message ${message.id}")
+          val stepId = message.content.metadata.getOrElse("stepId", "n/a")
+          val refinement = message.content.metadata.getOrElse("refinement", "false")
+          ctx.log.info(s"[${capability.name}] Streaming start stepId=$stepId refinement=$refinement msgId=${message.id}")
 
           given Materializer = Materializer(ctx.system)
 
@@ -85,9 +92,11 @@ object LLMAgent:
                 agentId = Some(ctx.self.path.name)
               )
               val updatedContext = context.addMessage(message).addMessage(responseMsg)
+              ctx.log.info(s"[${capability.name}] Streaming complete stepId=$stepId responseMsgId=${responseMsg.id} len=${fullResponse.length}")
               replyTo ! StreamComplete(responseMsg)
               NoOp
             case Failure(ex) =>
+              ctx.log.error(s"[${capability.name}] Streaming failed for stepId=$stepId", ex)
               replyTo ! StreamError(ex.getMessage)
               NoOp
           }

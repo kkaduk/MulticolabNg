@@ -80,6 +80,7 @@ object CoordinatorAgent:
           ctx.log.info(s"Coordinating task for conversation ${context.id}")
 
           val plan = decomposeTask(message.content.text, registry, ctx)
+          ctx.log.info(s"Planned steps: ${plan.steps.map(s => s"${s.id}:${s.agentCapability}[deps=${s.dependencies.mkString(",")}]").mkString(" -> ")}")
           val maxLoops = context.metadata
             .get("maxLoops")
             .flatMap(s => Try(s.toInt).toOption)
@@ -166,6 +167,7 @@ object CoordinatorAgent:
                     then
                       // Aggregate and reply
                       val aggregated = aggregateResults(updatedState)
+                      ctx.log.info(s"[$convId] Aggregated final response length=${aggregated.content.text.length}")
                       updatedState.replyTo ! ProcessedMessage(
                         aggregated,
                         updatedState.context
@@ -437,6 +439,8 @@ object CoordinatorAgent:
       s.dependencies.forall(dep => completedSet.contains(dep))
     }
 
+    ctx.log.info(s"[$convId] Ready steps: ${ready.map(_.id).mkString(",")}")
+
     ready.foldLeft(state) { (acc, step) =>
       dispatchSpecificStep(convId, acc, step, registry, refinement = false)
     }
@@ -483,9 +487,12 @@ object CoordinatorAgent:
       conversationId = state.context.id
     )
 
+    ctx.log.info(s"[$convId] Dispatching stepId=${step.id} to capability=${step.agentCapability} msgId=${userMsg.id}")
+
     // Resolve agent and send the message; correlate failures to this user message id
     ctx.pipeToSelf(registry.findAgent(step.agentCapability)):
       case Success(Some(agentRef)) =>
+        ctx.log.info(s"[$convId] Sending stepId=${step.id} to agentRef=${agentRef} msgId=${userMsg.id}")
         agentRef ! ProcessMessage(
           userMsg,
           state.context,
@@ -493,11 +500,13 @@ object CoordinatorAgent:
         )
         NoOp
       case Success(None) =>
+        ctx.log.warn(s"[$convId] Agent '${step.agentCapability}' not found for stepId=${step.id}, msgId=${userMsg.id}")
         ProcessingFailed(
           s"Agent '${step.agentCapability}' not found",
           userMsg.id
         )
       case Failure(ex) =>
+        ctx.log.error(s"[$convId] Failed to resolve capability '${step.agentCapability}' for stepId=${step.id}, msgId=${userMsg.id}", ex)
         ProcessingFailed(ex.getMessage, userMsg.id)
 
     state.copy(
