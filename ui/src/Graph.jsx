@@ -78,6 +78,7 @@ function toArrays(conv) {
 export default function Graph({ conversationId, conv }) {
   const containerRef = useRef(null);
   const networkRef = useRef(null);
+  const fitDoneRef = useRef(false);
 
   const data = useMemo(() => toArrays(conv), [conv]);
 
@@ -85,6 +86,9 @@ export default function Graph({ conversationId, conv }) {
     if (!containerRef.current) return;
 
     const options = {
+      autoResize: true,
+      height: "100%",
+      width: "100%",
       physics: {
         enabled: true,
         solver: "forceAtlas2Based",
@@ -100,6 +104,9 @@ export default function Graph({ conversationId, conv }) {
       interaction: {
         hover: true,
         tooltipDelay: 100,
+        dragView: true,
+        zoomView: false,
+        keyboard: { enabled: true, bindToWindow: true },
         hideEdgesOnDrag: false,
         hideEdgesOnZoom: false,
       },
@@ -117,15 +124,62 @@ export default function Graph({ conversationId, conv }) {
       networkRef.current.setOptions(options);
     }
 
-    // Fit view to content
-    const timer = setTimeout(() => {
+    // Fit view to content only initially per conversation
+    if (!fitDoneRef.current) {
+      requestAnimationFrame(() => {
+        try {
+          networkRef.current && networkRef.current.fit({ animation: { duration: 300, easingFunction: "easeInOutQuad" } });
+          fitDoneRef.current = true;
+        } catch {}
+      });
       try {
-        networkRef.current && networkRef.current.fit({ animation: { duration: 300, easingFunction: "easeInOutQuad" } });
+        networkRef.current && networkRef.current.once("stabilizationIterationsDone", () => {
+          try {
+            if (!fitDoneRef.current) {
+              networkRef.current.fit({ animation: { duration: 300, easingFunction: "easeInOutQuad" } });
+              fitDoneRef.current = true;
+            }
+          } catch {}
+        });
       } catch {}
-    }, 50);
+    }
 
-    return () => clearTimeout(timer);
+    return () => {};
   }, [data]);
+
+  useEffect(() => {
+    fitDoneRef.current = false;
+  }, [conversationId]);
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+
+    const ro = typeof ResizeObserver !== "undefined"
+      ? new ResizeObserver(() => {
+          if (!networkRef.current) return;
+          try {
+            networkRef.current.redraw();
+          } catch {}
+        })
+      : null;
+
+    if (ro) {
+      try { ro.observe(containerRef.current); } catch {}
+    }
+
+    const onResize = () => {
+      if (!networkRef.current) return;
+      try {
+        networkRef.current.redraw();
+      } catch {}
+    };
+    window.addEventListener("resize", onResize);
+
+    return () => {
+      if (ro) ro.disconnect();
+      window.removeEventListener("resize", onResize);
+    };
+  }, []);
 
   return (
     <div className="graphContainer">
@@ -133,7 +187,9 @@ export default function Graph({ conversationId, conv }) {
         <span className="mono">Conversation:</span>{" "}
         <span className="mono">{conversationId}</span>
       </div>
-      <div ref={containerRef} className="graphCanvas" />
+      <div className="graphCanvasScroll">
+        <div ref={containerRef} className="graphCanvas" />
+      </div>
     </div>
   );
 }

@@ -122,8 +122,9 @@ body {
   display: flex;
   flex-direction: column;
   height: 100%;
-  overflow: hidden; /* keep internal layout stable; children handle their own scroll */
+  overflow: auto; /* allow scrolling when content is obscured by overlaid dock */
   position: relative; /* allow dock to overlay without reducing canvas space */
+  padding-bottom: clamp(220px, 32vh, 380px); /* extra space to scroll content above dock */
 }
 
 .tabs {
@@ -157,7 +158,7 @@ body {
   gap: 12px;
   flex: 1 1 auto;     /* occupy remaining space above the dock */
   min-height: 0;      /* allow shrinking when dock is visible */
-  overflow: hidden;   /* internal components manage their own scroll */
+  overflow: auto;     /* allow scrolling when content is clipped by overlays or small viewport */
 }
 
 .legend {
@@ -189,7 +190,7 @@ body {
   flex-direction: column;
   flex: 1 1 auto;   /* fill available space */
   min-height: 0;    /* allow full-height growth */
-  overflow: hidden; /* keep canvas within container */
+  overflow: hidden; /* scrolling handled by .graphCanvasScroll */
 }
 
 .graphHeader {
@@ -199,10 +200,37 @@ body {
   flex-shrink: 0; /* do not collapse header when space is tight */
 }
 
+.graphCanvasScroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-width: 100%;
+  max-height: 100%;
+  overflow: auto; /* provide inner scrollbars for the graph area */
+  scrollbar-gutter: stable both-edges; /* keep space for scrollbars so layout doesn't shift */
+  overscroll-behavior: contain;        /* prevent outer containers from stealing scroll */
+}
+
+/* Visible custom scrollbars for the graph area */
+.graphCanvasScroll::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.graphCanvasScroll::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 8px;
+}
+.graphCanvasScroll::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+.graphCanvasScroll::-webkit-scrollbar-track {
+  background: #0a0f1c;
+  border-radius: 8px;
+}
+
 .graphCanvas {
   flex: 1 1 auto;
-  width: 100%;
-  height: 100%;
+  width: max(100%, 1600px);
+  height: max(100%, 1200px);
   border: 1px dashed #1f2937;
   border-radius: 6px;
   background: #0a0f1c;
