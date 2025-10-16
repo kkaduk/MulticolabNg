@@ -501,11 +501,6 @@ export default function App() {
           ) : (
             <>
               <div className="graphSection">
-                <div className="legend">
-                  <span className="badge coordinator">coordinator</span>
-                  <span className="badge agent">agent</span>
-                  <span className="badge step">step</span>
-                </div>
                 <Graph conversationId={activeConv} conv={conv} />
               </div>
               <DockPanels conv={conv} />
