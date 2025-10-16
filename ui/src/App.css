@@ -119,16 +119,21 @@ body {
   border: 1px solid #1f2937;
   border-radius: 10px;
   padding: 10px;
-  overflow: auto;
   display: flex;
   flex-direction: column;
+  height: 100%;
+  overflow: hidden; /* keep internal layout stable; children handle their own scroll */
 }
 
 .tabs {
   display: flex;
   gap: 6px;
   margin-bottom: 8px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;        /* keep to one row */
+  overflow-x: auto;         /* horizontal scroll if many conversation tabs */
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  flex-shrink: 0;           /* prevent taking extra height */
 }
 
 .tab {
@@ -149,6 +154,9 @@ body {
   display: grid;
   grid-template-columns: 1fr;
   gap: 12px;
+  flex: 1 1 auto;     /* occupy remaining space above the dock */
+  min-height: 0;      /* allow shrinking when dock is visible */
+  overflow: hidden;   /* internal components manage their own scroll */
 }
 
 .legend {
@@ -176,15 +184,18 @@ body {
   border: 1px solid #1f2937;
   border-radius: 8px;
   padding: 8px;
-  height: 440px;
   display: flex;
   flex-direction: column;
+  flex: 1 1 auto;   /* fill available space above the dock */
+  min-height: 220px;
+  overflow: hidden; /* keep canvas within container */
 }
 
 .graphHeader {
   font-size: 12px;
   color: var(--muted);
   margin-bottom: 6px;
+  flex-shrink: 0; /* do not collapse header when space is tight */
 }
 
 .graphCanvas {
@@ -430,4 +441,72 @@ body {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+/* Dock attached to main canvas (tabs: Conversation | Steps) */
+.dock {
+  margin-top: 8px;
+  background: #0b1220;
+  border: 1px solid #1f2937;
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+}
+
+.dock__tabs {
+  display: flex;
+  gap: 6px;
+  padding: 6px;
+  border-bottom: 1px solid #1f2937;
+  background: #0a0f1c;
+  border-top-left-radius: 10px;
+  border-top-right-radius: 10px;
+}
+
+.dock__tab {
+  background: #0b1220;
+  border: 1px solid #1f2937;
+  color: var(--text);
+  padding: 6px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.dock__tab--active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.dock__body {
+  height: clamp(200px, 30vh, 360px); /* smaller default so tabs are fully visible */
+  display: flex;
+  flex-direction: column;
+}
+
+.dock__pane {
+  flex: 1;
+  overflow: auto;   /* scrolling for both Conversation and Steps panes */
+  padding: 8px;
+}
+
+/* Steps table inside dock pane */
+.dock__pane table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.dock__pane th,
+.dock__pane td {
+  padding: 6px 8px;
+  border-bottom: 1px solid #1f2937;
+}
+
+.dock__pane th {
+  text-align: left;
+  color: var(--mono);
+  background: #0a0f1c;
+  position: sticky;
+  top: 0;
+  z-index: 1;
 }

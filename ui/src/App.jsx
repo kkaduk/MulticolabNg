@@ -370,6 +370,87 @@ function ConversationPanel({ conv }) {
   );
 }
 
+/* Docked tabs attached to main canvas: Conversation and Steps with scroll */
+function DockPanels({ conv }) {
+  const [tab, setTab] = useState(() => {
+    try {
+      return localStorage.getItem("dockTab") || "conversation";
+    } catch {
+      return "conversation";
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("dockTab", tab);
+    } catch {}
+  }, [tab]);
+
+  if (!conv) return null;
+
+  const chatItems = (conv.chat || []).map((m, idx) => (
+    <div key={m.messageId || idx} className={`msgRow msgRow--${m.role}`}>
+      <div className={`bubble bubble--${m.role}`}>
+        <div className="meta">
+          <span className="role">{m.role}</span>
+          {m.agent ? <span className="agent mono">@{m.agent}</span> : null}
+          {m.messageId ? <span className="msgid mono">{m.messageId}</span> : null}
+        </div>
+        <div className="text">{m.text}</div>
+      </div>
+    </div>
+  ));
+
+  return (
+    <div className="dock">
+      <div className="dock__tabs">
+        <button
+          className={`dock__tab ${tab === "conversation" ? "dock__tab--active" : ""}`}
+          onClick={() => setTab("conversation")}
+        >
+          Conversation
+        </button>
+        <button
+          className={`dock__tab ${tab === "steps" ? "dock__tab--active" : ""}`}
+          onClick={() => setTab("steps")}
+        >
+          Steps
+        </button>
+      </div>
+      <div className="dock__body">
+        {tab === "conversation" ? (
+          <div className="dock__pane">
+            {chatItems.length ? chatItems : <div className="muted">No messages yet.</div>}
+          </div>
+        ) : (
+          <div className="dock__pane">
+            <table>
+              <thead>
+                <tr>
+                  <th>Step Id</th>
+                  <th>Capability</th>
+                  <th>Status</th>
+                  <th>Message Id</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Array.from(conv.steps.entries()).map(([id, s]) => (
+                  <tr key={id}>
+                    <td>{id}</td>
+                    <td>{s.capability}</td>
+                    <td className={`status status--${s.status}`}>{s.status}</td>
+                    <td className="mono">{s.messageId || "-"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const { connected, events } = useTelemetry();
   const model = useMemo(() => buildModel(events), [events]);
@@ -426,9 +507,8 @@ export default function App() {
                   <span className="badge step">step</span>
                 </div>
                 <Graph conversationId={activeConv} conv={conv} />
-                <StepPanel conv={conv} />
               </div>
-              <ConversationPanel conv={conv} />
+              <DockPanels conv={conv} />
             </>
           )}
         </main>
