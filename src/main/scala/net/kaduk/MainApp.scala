@@ -11,6 +11,7 @@ import net.kaduk.infrastructure.grpc.AgentServiceImpl
 import net.kaduk.protobuf.agent_service.AgentServiceHandler
 import net.kaduk.config.AppConfig
 import net.kaduk.domain.{AgentCapability, AgentType}
+import net.kaduk.telemetry.{UiEventBus, TelemetryRoutes}
 import scala.concurrent.{ExecutionContext, Future}
 import scala.util.{Success, Failure}
 
@@ -23,6 +24,7 @@ object MainApp:
       
       val config = AppConfig.load()
       val registry = AgentRegistry()
+      val uiBus    = ctx.spawn(UiEventBus(), "ui-bus")
       
       // Spawn LLM agents
       config.agents.foreach: (name, agentConfig) =>
@@ -49,12 +51,12 @@ object MainApp:
             config = Map("systemPrompt" -> agentConfig.systemPrompt)
           )
 
-          val agentRef = ctx.spawn(LLMAgent(capability, provider, registry), actorName)
+          val agentRef = ctx.spawn(LLMAgent(capability, provider, registry, Some(uiBus)), actorName)
           
 
       
       // Spawn coordinator
-      val coordinatorRef = ctx.spawn(CoordinatorAgent(registry), "coordinator")
+      val coordinatorRef = ctx.spawn(CoordinatorAgent(registry, Some(uiBus)), "coordinator")
       
       // Start gRPC server
       val service: HttpRequest => Future[HttpResponse] =
@@ -66,6 +68,13 @@ object MainApp:
         case Failure(ex) =>
           ctx.system.log.error("Failed to bind gRPC server", ex)
           ctx.system.terminate()
+      
+      // UI WebSocket + demo trigger server (ws://localhost:6061/ws, GET /demo)
+      Http().newServerAt("0.0.0.0", 6061).bind(TelemetryRoutes.routes(uiBus, coordinatorRef)).onComplete:
+        case Success(binding) =>
+          ctx.system.log.info(s"UI server bound to ${binding.localAddress}")
+        case Failure(ex) =>
+          ctx.system.log.error("Failed to bind UI server", ex)
       
       Behaviors.empty
     

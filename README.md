@@ -374,7 +374,7 @@ Final Response:
 * You can run multiple agent nodes by changing ports or running them in containers:
 
   ```bash
-  sbt -Dgrpc.port=6061 "runMain net.kaduk.HumanAgentClient"
+  sbt -Dgrpc.port=6060 "runMain net.kaduk.HumanAgentClient"
   ```
 
 * Environment variables are read at startup; restarting the agent is required if keys change.

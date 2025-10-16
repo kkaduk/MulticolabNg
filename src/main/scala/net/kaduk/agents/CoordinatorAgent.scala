@@ -5,6 +5,7 @@ import org.apache.pekko.actor.typed.scaladsl.{ActorContext, Behaviors}
 import net.kaduk.domain.*
 import net.kaduk.infrastructure.registry.AgentRegistry
 import net.kaduk.agents.BaseAgent.*
+import net.kaduk.telemetry.UiEventBus
 import scala.concurrent.{ExecutionContext}
 import scala.util.{Success, Failure, Try}
 import scala.concurrent.Await
@@ -65,14 +66,16 @@ object CoordinatorAgent:
   )
 
   def apply(
-      registry: AgentRegistry
+      registry: AgentRegistry,
+      uiBus: Option[ActorRef[UiEventBus.Command]] = None
   )(using ec: ExecutionContext): Behavior[Command] =
     Behaviors.setup: ctx =>
-      idle(registry, Map.empty)(using ctx, ec)
+      idle(registry, Map.empty, uiBus)(using ctx, ec)
 
   private def idle(
       registry: AgentRegistry,
-      activeTasks: Map[String, TaskState]
+      activeTasks: Map[String, TaskState],
+      uiBus: Option[ActorRef[UiEventBus.Command]]
   )(using ctx: ActorContext[Command], ec: ExecutionContext): Behavior[Command] =
     Behaviors.receiveMessage:
       case ProcessMessage(message, context, replyTo) =>
@@ -80,7 +83,11 @@ object CoordinatorAgent:
           ctx.log.info(s"Coordinating task for conversation ${context.id}")
 
           val plan = decomposeTask(message.content.text, registry, ctx)
+          uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.PlanComputed(context.id, plan.steps.map(s => UiEventBus.StepInfo(s.id, s.agentCapability, s.dependencies)))))
           ctx.log.info(s"Planned steps: ${plan.steps.map(s => s"${s.id}:${s.agentCapability}[deps=${s.dependencies.mkString(",")}]").mkString(" -> ")}")
+          // Publish the initial user task to the conversation console
+          uiBus.foreach(_ => UiEventBus) // keep reference
+          uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.ChatMessage(context.id, "user", message.id, message.content.text, None)))
           val maxLoops = context.metadata
             .get("maxLoops")
             .flatMap(s => Try(s.toInt).toOption)
@@ -95,9 +102,9 @@ object CoordinatorAgent:
             maxAttempts = maxLoops
           )
 
-          val state1 = dispatchReadySteps(context.id, state0, registry)
+          val state1 = dispatchReadySteps(context.id, state0, registry, uiBus)
 
-          coordinating(registry, activeTasks + (context.id -> state1))
+          coordinating(registry, activeTasks + (context.id -> state1), uiBus)
 
       case Stop =>
         Behaviors.stopped
@@ -108,7 +115,8 @@ object CoordinatorAgent:
 
   private def coordinating(
       registry: AgentRegistry,
-      activeTasks: Map[String, TaskState]
+      activeTasks: Map[String, TaskState],
+      uiBus: Option[ActorRef[UiEventBus.Command]]
   )(using ctx: ActorContext[Command], ec: ExecutionContext): Behavior[Command] =
     Behaviors.receiveMessage:
       case pm: ProcessedMessage =>
@@ -117,7 +125,7 @@ object CoordinatorAgent:
           val stateOpt: Option[TaskState] = activeTasks.get(convId)
           stateOpt match
             case None =>
-              idle(registry, activeTasks) // No state, ignore and go idle
+              idle(registry, activeTasks, uiBus) // No state, ignore and go idle
             case Some(st) =>
               // The last user message id added just before the agent's assistant response
               val lastUserIdOpt =
@@ -135,8 +143,9 @@ object CoordinatorAgent:
                   // As a fallback, reply aggregated result
                   val aggregated =
                     aggregateResults(st.copy(context = pm.updatedContext))
+                  uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.AggregateCompleted(convId, aggregated.content.text.length)))
                   st.replyTo ! ProcessedMessage(aggregated, pm.updatedContext)
-                  idle(registry, activeTasks - convId)
+                  idle(registry, activeTasks - convId, uiBus)
 
                 case Some(stepId) =>
                   ctx.log.info(
@@ -155,6 +164,10 @@ object CoordinatorAgent:
                     msgIdToStep = cleanedMap
                   )
 
+                  // Notify UI: assistant message and step completed
+                  uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.ChatMessage(convId, "assistant", pm.message.id, pm.message.content.text, pm.message.agentId)))
+                  uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.StepCompleted(convId, stepId)))
+
                   // If all steps done and nothing in progress, evaluate satisfaction
                   val allSteps = updatedState.plan.steps.map(_.id).toSet
                   val doneNow =
@@ -168,11 +181,14 @@ object CoordinatorAgent:
                       // Aggregate and reply
                       val aggregated = aggregateResults(updatedState)
                       ctx.log.info(s"[$convId] Aggregated final response length=${aggregated.content.text.length}")
+                      uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.AggregateCompleted(convId, aggregated.content.text.length)))
+                      // Publish final assistant message from coordinator to conversation console
+                      uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.ChatMessage(convId, "assistant", aggregated.id, aggregated.content.text, aggregated.agentId)))
                       updatedState.replyTo ! ProcessedMessage(
                         aggregated,
                         updatedState.context
                       )
-                      idle(registry, activeTasks - convId)
+                      idle(registry, activeTasks - convId, uiBus)
                     else
                       // Not satisfactory, attempt refinement: re-run last step with refinement hint
                       updatedState.plan.steps.lastOption match
@@ -191,11 +207,13 @@ object CoordinatorAgent:
                             refinedState,
                             lastStep,
                             registry,
-                            refinement = true
+                            refinement = true,
+                            uiBus
                           )
                           coordinating(
                             registry,
-                            activeTasks + (convId -> afterDispatch)
+                            activeTasks + (convId -> afterDispatch),
+                            uiBus
                           )
                         case None =>
                           // No steps? Return empty aggregation
@@ -204,12 +222,12 @@ object CoordinatorAgent:
                             aggregated,
                             updatedState.context
                           )
-                          idle(registry, activeTasks - convId)
+                          idle(registry, activeTasks - convId, uiBus)
                   else
                     // Schedule further ready steps if any
                     val nextState =
-                      dispatchReadySteps(convId, updatedState, registry)
-                    coordinating(registry, activeTasks + (convId -> nextState))
+                      dispatchReadySteps(convId, updatedState, registry, uiBus)
+                    coordinating(registry, activeTasks + (convId -> nextState), uiBus)
 
       case failed: ProcessingFailed =>
         // Correlate failure using messageId -> stepId map across conversations
@@ -228,9 +246,9 @@ object CoordinatorAgent:
             activeTasks.headOption match
               case Some((cid, st)) =>
                 st.replyTo ! failed
-                idle(registry, activeTasks - cid)
+                idle(registry, activeTasks - cid, uiBus)
               case None =>
-                idle(registry, activeTasks)
+                idle(registry, activeTasks, uiBus)
 
           case Some((convId, state)) =>
             withLogging(ctx, convId):
@@ -241,8 +259,9 @@ object CoordinatorAgent:
 
               // Non-retryable errors (e.g., agent not found) should fail fast without retries
               if failed.error.toLowerCase.contains("not found") then
+                uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.ChatMessage(convId, "assistant", java.util.UUID.randomUUID().toString, s"Error: ${failed.error}", Some("coordinator"))))
                 state.replyTo ! failed
-                idle(registry, activeTasks - convId)
+                idle(registry, activeTasks - convId, uiBus)
               else if state.attempts < (state.maxAttempts - 1) then
                 val refinedState = state.copy(
                   attempts = state.attempts + 1,
@@ -257,13 +276,15 @@ object CoordinatorAgent:
                   refinedState,
                   step,
                   registry,
-                  refinement = true
+                  refinement = true,
+                  uiBus
                 )
-                coordinating(registry, activeTasks + (convId -> afterDispatch))
+                coordinating(registry, activeTasks + (convId -> afterDispatch), uiBus)
               else
                 // Exhausted attempts - fail the whole conversation
+                uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.ChatMessage(convId, "assistant", java.util.UUID.randomUUID().toString, s"Error: ${failed.error}", Some("coordinator"))))
                 state.replyTo ! failed
-                idle(registry, activeTasks - convId)
+                idle(registry, activeTasks - convId, uiBus)
 
       case Stop =>
         Behaviors.stopped
@@ -429,7 +450,8 @@ object CoordinatorAgent:
   private def dispatchReadySteps(
       convId: String,
       state: TaskState,
-      registry: AgentRegistry
+      registry: AgentRegistry,
+      uiBus: Option[ActorRef[UiEventBus.Command]]
   )(using ctx: ActorContext[Command], ec: ExecutionContext): TaskState =
     val completedSet = state.completed
     val inProg = state.inProgress
@@ -442,7 +464,7 @@ object CoordinatorAgent:
     ctx.log.info(s"[$convId] Ready steps: ${ready.map(_.id).mkString(",")}")
 
     ready.foldLeft(state) { (acc, step) =>
-      dispatchSpecificStep(convId, acc, step, registry, refinement = false)
+      dispatchSpecificStep(convId, acc, step, registry, refinement = false, uiBus)
     }
 
   // Dispatch a specific step with optional refinement instruction
@@ -451,7 +473,8 @@ object CoordinatorAgent:
       state: TaskState,
       step: TaskStep,
       registry: AgentRegistry,
-      refinement: Boolean
+      refinement: Boolean,
+      uiBus: Option[ActorRef[UiEventBus.Command]]
   )(using ctx: ActorContext[Command], ec: ExecutionContext): TaskState =
     val depsContextText =
       if step.dependencies.nonEmpty then
@@ -488,6 +511,8 @@ object CoordinatorAgent:
     )
 
     ctx.log.info(s"[$convId] Dispatching stepId=${step.id} to capability=${step.agentCapability} msgId=${userMsg.id}")
+    uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.StepDispatched(convId, step.id, step.agentCapability, userMsg.id)))
+    uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.ChatMessage(convId, "user", userMsg.id, userMsg.content.text, None)))
 
     // Resolve agent and send the message; correlate failures to this user message id
     ctx.pipeToSelf(registry.findAgent(step.agentCapability)):
@@ -501,12 +526,16 @@ object CoordinatorAgent:
         NoOp
       case Success(None) =>
         ctx.log.warn(s"[$convId] Agent '${step.agentCapability}' not found for stepId=${step.id}, msgId=${userMsg.id}")
+        uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.ErrorEvent(convId, s"Agent '${step.agentCapability}' not found for stepId=${step.id}")))
+        uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.ChatMessage(convId, "assistant", java.util.UUID.randomUUID().toString, s"Error: Agent '${step.agentCapability}' not found for stepId=${step.id}", Some("coordinator"))))
         ProcessingFailed(
           s"Agent '${step.agentCapability}' not found",
           userMsg.id
         )
       case Failure(ex) =>
         ctx.log.error(s"[$convId] Failed to resolve capability '${step.agentCapability}' for stepId=${step.id}, msgId=${userMsg.id}", ex)
+        uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.ErrorEvent(convId, s"Failed to resolve '${step.agentCapability}' for stepId=${step.id}: ${ex.getMessage}")))
+        uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.ChatMessage(convId, "assistant", java.util.UUID.randomUUID().toString, s"Error: Failed to resolve '${step.agentCapability}' for stepId=${step.id}: ${ex.getMessage}", Some("coordinator"))))
         ProcessingFailed(ex.getMessage, userMsg.id)
 
     state.copy(

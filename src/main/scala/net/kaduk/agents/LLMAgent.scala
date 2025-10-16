@@ -9,6 +9,7 @@ import net.kaduk.domain.*
 import net.kaduk.infrastructure.llm.LLMProvider
 import net.kaduk.infrastructure.registry.AgentRegistry
 import net.kaduk.agents.BaseAgent.*
+import net.kaduk.telemetry.UiEventBus
 import scala.concurrent.{ExecutionContext, Future}
 import scala.util.{Success, Failure}
 
@@ -17,21 +18,23 @@ object LLMAgent:
   def apply(
     capability: AgentCapability,
     provider: LLMProvider,
-    registry: AgentRegistry
+    registry: AgentRegistry,
+    uiBus: Option[ActorRef[UiEventBus.Command]] = None
   )(using ec: ExecutionContext): Behavior[Command] =
     Behaviors.setup { ctx =>
       given ActorContext[Command] = ctx
       // Register capability and skills on startup
       registry.register(ctx.self, capability)
       // Start in idle behavior
-      idle(capability, provider, registry, Map.empty)
+      idle(capability, provider, registry, Map.empty, uiBus)
     }
 
   private def idle(
     capability: AgentCapability,
     provider: LLMProvider,
     registry: AgentRegistry,
-    conversations: Map[String, ConversationContext]
+    conversations: Map[String, ConversationContext],
+    uiBus: Option[ActorRef[UiEventBus.Command]]
   )(using ctx: ActorContext[Command], ec: ExecutionContext): Behavior[Command] =
     Behaviors.receiveMessage[Command] {
       case ProcessMessage(message, context, replyTo) =>
@@ -40,6 +43,8 @@ object LLMAgent:
           val stepId = message.content.metadata.getOrElse("stepId", "n/a")
           val refinement = message.content.metadata.getOrElse("refinement", "false")
           ctx.log.info(s"[${capability.name}] Starting stepId=$stepId refinement=$refinement msgId=${message.id}")
+          uiBus.foreach(_ => UiEventBus) // keep import alive if optimized
+          uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.AgentStart(context.id, capability.name, stepId, message.id, refinement.equalsIgnoreCase("true"))))
 
           ctx.pipeToSelf(
             provider.completion(
@@ -56,15 +61,19 @@ object LLMAgent:
               )
               val updatedContext = context.addMessage(message).addMessage(responseMsg)
               ctx.log.info(s"[${capability.name}] Completed stepId=$stepId responseMsgId=${responseMsg.id} len=${response.length}")
+              uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.AgentComplete(context.id, capability.name, stepId, responseMsg.id, response.length)))
+              uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.ChatMessage(context.id, "assistant", responseMsg.id, response, Some(ctx.self.path.name))))
               replyTo ! ProcessedMessage(responseMsg, updatedContext)
               NoOp // Return to idle via processing handler
             case Failure(ex) =>
               ctx.log.error(s"[${capability.name}] LLM completion failed for stepId=$stepId", ex)
+              uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.ErrorEvent(context.id, ex.getMessage)))
+              uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.ChatMessage(context.id, "assistant", java.util.UUID.randomUUID().toString, s"Error: ${ex.getMessage}", Some(ctx.self.path.name))))
               replyTo ! ProcessingFailed(ex.getMessage, message.id)
               NoOp
           }
 
-          processing(capability, provider, registry, conversations + (context.id -> context), replyTo)
+          processing(capability, provider, registry, conversations + (context.id -> context), replyTo, uiBus)
         }
 
       case StreamMessage(message, context, replyTo) =>
@@ -73,6 +82,7 @@ object LLMAgent:
           val stepId = message.content.metadata.getOrElse("stepId", "n/a")
           val refinement = message.content.metadata.getOrElse("refinement", "false")
           ctx.log.info(s"[${capability.name}] Streaming start stepId=$stepId refinement=$refinement msgId=${message.id}")
+          uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.AgentStart(context.id, capability.name, stepId, message.id, refinement.equalsIgnoreCase("true"))))
 
           given Materializer = Materializer(ctx.system)
 
@@ -93,10 +103,14 @@ object LLMAgent:
               )
               val updatedContext = context.addMessage(message).addMessage(responseMsg)
               ctx.log.info(s"[${capability.name}] Streaming complete stepId=$stepId responseMsgId=${responseMsg.id} len=${fullResponse.length}")
+              uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.AgentComplete(context.id, capability.name, stepId, responseMsg.id, fullResponse.length)))
+              uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.ChatMessage(context.id, "assistant", responseMsg.id, fullResponse, Some(ctx.self.path.name))))
               replyTo ! StreamComplete(responseMsg)
               NoOp
             case Failure(ex) =>
               ctx.log.error(s"[${capability.name}] Streaming failed for stepId=$stepId", ex)
+              uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.ErrorEvent(context.id, ex.getMessage)))
+              uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.ChatMessage(context.id, "assistant", java.util.UUID.randomUUID().toString, s"Error: ${ex.getMessage}", Some(ctx.self.path.name))))
               replyTo ! StreamError(ex.getMessage)
               NoOp
           }
@@ -106,7 +120,7 @@ object LLMAgent:
             replyTo ! StreamChunk(token.content, token.messageId)
           }
 
-          processing(capability, provider, registry, conversations + (context.id -> context), replyTo)
+          processing(capability, provider, registry, conversations + (context.id -> context), replyTo, uiBus)
         }
 
       case GetStatus =>
@@ -139,7 +153,8 @@ object LLMAgent:
     provider: LLMProvider,
     registry: AgentRegistry,
     conversations: Map[String, ConversationContext],
-    pendingReply: ActorRef[?]
+    pendingReply: ActorRef[?],
+    uiBus: Option[ActorRef[UiEventBus.Command]]
   )(using ctx: ActorContext[Command], ec: ExecutionContext): Behavior[Command] =
     Behaviors.receiveMessage[Command] {
       case Stop =>
@@ -148,7 +163,7 @@ object LLMAgent:
         Behaviors.stopped
 
       case NoOp =>
-        idle(capability, provider, registry, conversations)
+        idle(capability, provider, registry, conversations, uiBus)
 
       case _ =>
         ctx.log.warn("Ignoring message while processing")
