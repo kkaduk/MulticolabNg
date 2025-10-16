@@ -367,7 +367,13 @@ Final Response:
 "The European AI Act establishes unified risk-based rules for AI governance in finance..."
 ```
 
----
+## 🔁 Step 5 — Run UI for conversation observation
+
+```
+cd ui && npm run dev
+```
+
+![UI Screen](picture/UI_Conv)1.png)
 
 ## 🧩 Notes
 
@@ -390,5 +396,6 @@ Final Response:
 | **1**        | `sbt "runMain net.kaduk.MainApp"`                           | Starts main coordination platform (Registry + CoordinatorAgent) |
 | **2**        | `sbt -Dgrpc.port=6060 "runMain net.kaduk.HumanAgentClient"` | Launches interactive human client via gRPC                      |
 | **Env Vars** | `export OPENAI_API_KEY=...` etc.                            | Configure credentials for selected LLM provider                 |
+
 
 
