@@ -654,10 +654,10 @@ Respond with JSON:
 
   // ========== Utility ==========
 
-  private def withLogging[T](ctx: ActorContext[?], conversationId: String)(block: => T): T =
-    try block
-    catch {
-      case ex: Exception =>
-        ctx.log.error(s"Error in conversation $conversationId", ex)
-        throw ex
-    }
+  // private def withLogging[T](ctx: ActorContext[?], conversationId: String)(block: => T): T =
+  //   try block
+  //   catch {
+  //     case ex: Exception =>
+  //       ctx.log.error(s"Error in conversation $conversationId", ex)
+  //       throw ex
+  //   }

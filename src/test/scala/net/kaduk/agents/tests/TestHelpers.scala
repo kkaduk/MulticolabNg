@@ -13,6 +13,11 @@ object TestHelpers:
     delay: scala.concurrent.duration.FiniteDuration = scala.concurrent.duration.Duration.Zero
   )(using ec: ExecutionContext) extends LLMProvider:
     
+
+    override def name: String = ???
+
+    override def close(): Future[Unit] = ???
+
     override def completion(messages: Seq[Message], systemPrompt: String): Future[String] =
       Future {
         Thread.sleep(delay.toMillis)

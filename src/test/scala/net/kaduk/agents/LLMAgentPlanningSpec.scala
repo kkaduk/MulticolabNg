@@ -28,6 +28,11 @@ class LLMAgentPlanningSpec extends AnyWordSpec with Matchers with BeforeAndAfter
   // ========== Test Fixtures ==========
 
   class MockLLMProvider(responses: Map[String, String] = Map.empty) extends LLMProvider:
+
+    override def name: String = ???
+
+    override def close(): Future[Unit] = ???
+
     var callCount = 0
     var lastPrompt = ""
     
@@ -141,10 +146,10 @@ class LLMAgentPlanningSpec extends AnyWordSpec with Matchers with BeforeAndAfter
       }
     
     private def extractJsonField(json: String, field: String): Option[String] =
-      s""""$field"\s*:\s*"([^"]+)"""".r.findFirstMatchIn(json).map(_.group(1))
+      raw""""$field"\s*:\s*"([^"]+)"""".r.findFirstMatchIn(json).map(_.group(1))
 
     private def extractJsonArray(json: String, field: String): Seq[String] =
-      s""""$field"\s*:\s*\[(.*?)\]""".r.findFirstMatchIn(json).map { m =>
+      raw""""$field"\s*:\s*\[(.*?)\]""".r.findFirstMatchIn(json).map { m =>
         """"([^"]+)"""".r.findAllMatchIn(m.group(1)).map(_.group(1)).toSeq
       }.getOrElse(Seq.empty)
 
@@ -157,19 +162,19 @@ class LLMAgentPlanningSpec extends AnyWordSpec with Matchers with BeforeAndAfter
       val registry = AgentRegistry()
       
       val nerAgent = createMockAgent("ner", registry)
-      registry.register(nerAgent, AgentCapability("ner", AgentType.Specialist, Set("ner", "entity-extraction")))
+      registry.register(nerAgent, AgentCapability("ner", AgentType.Specialist, Set("ner", "entity-extraction"), "test", Map.empty))
       
       val sentimentAgent = createMockAgent("sentiment", registry)
-      registry.register(sentimentAgent, AgentCapability("sentiment", AgentType.Specialist, Set("sentiment")))
+      registry.register(sentimentAgent, AgentCapability("sentiment", AgentType.Specialist, Set("sentiment"), "test", Map.empty))
       
       Thread.sleep(100)
       
       val uiBusProbe = testKit.createTestProbe[UiEventBus.Command]()
-      val replyProbe = testKit.createTestProbe[Command]()
+      val replyProbe = testKit.createTestProbe[Any]()
       
       val agent = testKit.spawn(
         LLMAgent(
-          AgentCapability("orchestrator", AgentType.Orchestrator, Set("planning")),
+          AgentCapability("orchestrator", AgentType.Orchestrator, Set("planning"), "test", Map.empty),
           provider,
           registry,
           Some(uiBusProbe.ref),
@@ -186,7 +191,7 @@ class LLMAgentPlanningSpec extends AnyWordSpec with Matchers with BeforeAndAfter
       agent ! BaseAgent.ProcessMessage(
         message,
         ConversationContext("test-conv"),
-        replyProbe.ref
+        replyProbe.ref.unsafeUpcast[Any]
       )
       
       Thread.sleep(500)
@@ -306,10 +311,11 @@ class LLMAgentPlanningSpec extends AnyWordSpec with Matchers with BeforeAndAfter
       val registry = AgentRegistry()
       
       val nerAgent = createMockAgent("ner", registry)
-      registry.register(nerAgent, AgentCapability("ner", AgentType.Specialist, Set("ner")))
+      registry.register(nerAgent, AgentCapability("ner", AgentType.Specialist, Set("ner"), "test", Map.empty))
+      registry.register(nerAgent, AgentCapability("ner", AgentType.Specialist, Set("ner"), "test", Map.empty))
       
       val genericAgent = createMockAgent("generic", registry)
-      registry.register(genericAgent, AgentCapability("generic", AgentType.Worker, Set("ner", "other")))
+      registry.register(genericAgent, AgentCapability("generic", AgentType.Worker, Set("ner", "other"), "test", Map.empty))
       
       Thread.sleep(100)
       
@@ -324,7 +330,7 @@ class LLMAgentPlanningSpec extends AnyWordSpec with Matchers with BeforeAndAfter
       val multiSkillAgent = createMockAgent("multi", registry)
       registry.register(
         multiSkillAgent,
-        AgentCapability("multi", AgentType.Worker, Set("ner", "sentiment", "qa"))
+        AgentCapability("multi", AgentType.Worker, Set("ner", "sentiment", "qa"), "test", Map.empty)
       )
       
       Thread.sleep(100)
@@ -362,19 +368,19 @@ class LLMAgentPlanningSpec extends AnyWordSpec with Matchers with BeforeAndAfter
       val registry = AgentRegistry()
       
       val nerAgent = createMockAgent("ner", registry, "Entities: John, Apple, NYC")
-      registry.register(nerAgent, AgentCapability("ner", AgentType.Specialist, Set("ner")))
+      registry.register(nerAgent, AgentCapability("ner", AgentType.Specialist, Set("ner"), "test"))
       
       val summaryAgent = createMockAgent("summarization", registry, "Summary: Text contains 3 entities")
-      registry.register(summaryAgent, AgentCapability("summarization", AgentType.Specialist, Set("summarization")))
+      registry.register(summaryAgent, AgentCapability("summarization", AgentType.Specialist, Set("summarization"), "test", Map.empty))
       
       Thread.sleep(100)
       
       val uiBusProbe = testKit.createTestProbe[UiEventBus.Command]()
-      val replyProbe = testKit.createTestProbe[Command]()
+      val replyProbe = testKit.createTestProbe[Any]()
       
       val agent = testKit.spawn(
         LLMAgent(
-          AgentCapability("orchestrator", AgentType.Orchestrator, Set("planning")),
+          AgentCapability("orchestrator", AgentType.Orchestrator, Set("planning"), "test", Map.empty),
           provider,
           registry,
           Some(uiBusProbe.ref),
@@ -391,7 +397,7 @@ class LLMAgentPlanningSpec extends AnyWordSpec with Matchers with BeforeAndAfter
       agent ! BaseAgent.ProcessMessage(
         message,
         ConversationContext("test-conv"),
-        replyProbe.ref
+        replyProbe.ref.unsafeUpcast[Any]
       )
       
       val planEvent = uiBusProbe.expectMessageType[UiEventBus.Command](5.seconds)
@@ -428,11 +434,11 @@ class LLMAgentPlanningSpec extends AnyWordSpec with Matchers with BeforeAndAfter
       
       val registry = AgentRegistry()
       val uiBusProbe = testKit.createTestProbe[UiEventBus.Command]()
-      val replyProbe = testKit.createTestProbe[Command]()
+      val replyProbe = testKit.createTestProbe[Any]()
       
       val agent = testKit.spawn(
         LLMAgent(
-          AgentCapability("orchestrator", AgentType.Orchestrator, Set("planning")),
+          AgentCapability("orchestrator", AgentType.Orchestrator, Set("planning"), "test", Map.empty),
           provider,
           registry,
           Some(uiBusProbe.ref),
@@ -449,7 +455,7 @@ class LLMAgentPlanningSpec extends AnyWordSpec with Matchers with BeforeAndAfter
       agent ! BaseAgent.ProcessMessage(
         message,
         ConversationContext("test-conv"),
-        replyProbe.ref
+        replyProbe.ref.unsafeUpcast[Any]
       )
       
       val response = replyProbe.expectMessageType[BaseAgent.ProcessedMessage](10.seconds)
@@ -474,7 +480,7 @@ class LLMAgentPlanningSpec extends AnyWordSpec with Matchers with BeforeAndAfter
       val registry = AgentRegistry()
       
       val okAgent = createMockAgent("ok", registry, "Success")
-      registry.register(okAgent, AgentCapability("ok", AgentType.Worker, Set("ok")))
+      registry.register(okAgent, AgentCapability("ok", AgentType.Worker, Set("ok"), "test", Map.empty))
       
       val failAgent = testKit.spawn(
         org.apache.pekko.actor.typed.scaladsl.Behaviors.receiveMessage[Command] {
@@ -486,16 +492,16 @@ class LLMAgentPlanningSpec extends AnyWordSpec with Matchers with BeforeAndAfter
         },
         "fail-agent"
       )
-      registry.register(failAgent, AgentCapability("fail", AgentType.Worker, Set("fail")))
+      registry.register(failAgent, AgentCapability("fail", AgentType.Worker, Set("fail"), "test", Map.empty))
       
       Thread.sleep(100)
       
       val uiBusProbe = testKit.createTestProbe[UiEventBus.Command]()
-      val replyProbe = testKit.createTestProbe[Command]()
+      val replyProbe = testKit.createTestProbe[Any]()
       
       val agent = testKit.spawn(
         LLMAgent(
-          AgentCapability("orchestrator", AgentType.Orchestrator, Set("planning")),
+          AgentCapability("orchestrator", AgentType.Orchestrator, Set("planning"), "test", Map.empty),
           provider,
           registry,
           Some(uiBusProbe.ref),
@@ -512,14 +518,14 @@ class LLMAgentPlanningSpec extends AnyWordSpec with Matchers with BeforeAndAfter
       agent ! BaseAgent.ProcessMessage(
         message,
         ConversationContext("test-conv"),
-        replyProbe.ref
+        replyProbe.ref.unsafeUpcast[Any]
       )
       
       uiBusProbe.fishForMessage(5.seconds) {
         case UiEventBus.Publish(UiEventBus.ErrorEvent(_, msg)) if msg.contains("failure") =>
-          FishingOutcomes.complete
+          FishingOutcome.Complete
         case _ =>
-          FishingOutcomes.continue
+          FishingOutcome.Continue
       }
       
       val response = replyProbe.expectMessageType[Command](10.seconds)
@@ -559,14 +565,14 @@ class LLMAgentPlanningSpec extends AnyWordSpec with Matchers with BeforeAndAfter
         },
         "concurrent-agent"
       )
-      registry.register(concurrentAgent, AgentCapability("concurrent", AgentType.Worker, Set("concurrent")))
+      registry.register(concurrentAgent, AgentCapability("concurrent", AgentType.Worker, Set("concurrent"), "test", Map.empty))
       
       Thread.sleep(100)
       
       val uiBusProbe = testKit.createTestProbe[UiEventBus.Command]()
       val agent = testKit.spawn(
         LLMAgent(
-          AgentCapability("orchestrator", AgentType.Orchestrator, Set("planning")),
+          AgentCapability("orchestrator", AgentType.Orchestrator, Set("planning"), "test", Map.empty),
           provider,
           registry,
           Some(uiBusProbe.ref),
@@ -575,13 +581,13 @@ class LLMAgentPlanningSpec extends AnyWordSpec with Matchers with BeforeAndAfter
       )
       
       val replyProbes = (1 to 5).map { i =>
-        val probe = testKit.createTestProbe[Command](s"reply-$i")
+        val probe = testKit.createTestProbe[Any](s"reply-$i")
         val message = Message(
           role = MessageRole.User,
           content = MessageContent(s"Concurrent request $i"),
           conversationId = s"conv-$i"
         )
-        agent ! BaseAgent.ProcessMessage(message, ConversationContext(s"conv-$i"), probe.ref)
+        agent ! BaseAgent.ProcessMessage(message, ConversationContext(s"conv-$i"), probe.ref.unsafeUpcast[Any])
         probe
       }
       
@@ -626,13 +632,13 @@ class LLMAgentPlanningSpec extends AnyWordSpec with Matchers with BeforeAndAfter
         },
         "load-agent"
       )
-      registry.register(loadAgent, AgentCapability("load", AgentType.Worker, Set("load")))
+      registry.register(loadAgent, AgentCapability("load", AgentType.Worker, Set("load"), "test", Map.empty))
       
       Thread.sleep(100)
       
       val agent = testKit.spawn(
         LLMAgent(
-          AgentCapability("orchestrator", AgentType.Orchestrator, Set("planning")),
+          AgentCapability("orchestrator", AgentType.Orchestrator, Set("planning"), "test", Map.empty),
           provider,
           registry,
           None,
@@ -643,13 +649,13 @@ class LLMAgentPlanningSpec extends AnyWordSpec with Matchers with BeforeAndAfter
       val startTime = System.currentTimeMillis()
       
       val replyProbes = (1 to 100).map { i =>
-        val probe = testKit.createTestProbe[Command](s"load-reply-$i")
+        val probe = testKit.createTestProbe[Any](s"load-reply-$i")
         val message = Message(
           role = MessageRole.User,
           content = MessageContent(s"Load test message $i"),
           conversationId = s"load-conv-$i"
         )
-        agent ! BaseAgent.ProcessMessage(message, ConversationContext(s"load-conv-$i"), probe.ref)
+        agent ! BaseAgent.ProcessMessage(message, ConversationContext(s"load-conv-$i"), probe.ref.unsafeUpcast[Any])
         probe
       }
       
@@ -686,17 +692,17 @@ class LLMAgentPlanningSpec extends AnyWordSpec with Matchers with BeforeAndAfter
       
       (1 to 5).foreach { i =>
         val agent = createMockAgent(s"agent$i", registry, s"Agent $i response")
-        registry.register(agent, AgentCapability(s"agent$i", AgentType.Worker, Set(s"agent$i")))
+        registry.register(agent, AgentCapability(s"agent$i", AgentType.Worker, Set(s"agent$i"), "test", Map.empty))
       }
       
       Thread.sleep(100)
       
       val uiBusProbe = testKit.createTestProbe[UiEventBus.Command]()
-      val replyProbe = testKit.createTestProbe[Command]()
+      val replyProbe = testKit.createTestProbe[Any]()
       
       val agent = testKit.spawn(
         LLMAgent(
-          AgentCapability("orchestrator", AgentType.Orchestrator, Set("planning")),
+          AgentCapability("orchestrator", AgentType.Orchestrator, Set("planning"), "test", Map.empty),
           provider,
           registry,
           Some(uiBusProbe.ref),
@@ -715,7 +721,7 @@ class LLMAgentPlanningSpec extends AnyWordSpec with Matchers with BeforeAndAfter
       agent ! BaseAgent.ProcessMessage(
         message,
         ConversationContext("fanout-conv"),
-        replyProbe.ref
+        replyProbe.ref.unsafeUpcast[Any]
       )
       
       val planEvent = uiBusProbe.expectMessageType[UiEventBus.Command](5.seconds)
@@ -740,7 +746,7 @@ class LLMAgentPlanningSpec extends AnyWordSpec with Matchers with BeforeAndAfter
       
       val agent = testKit.spawn(
         LLMAgent(
-          AgentCapability("orchestrator", AgentType.Orchestrator, Set("planning")),
+          AgentCapability("orchestrator", AgentType.Orchestrator, Set("planning"), "test", Map.empty),
           provider,
           registry,
           None,
@@ -754,13 +760,13 @@ class LLMAgentPlanningSpec extends AnyWordSpec with Matchers with BeforeAndAfter
       val initialMemory = runtime.totalMemory() - runtime.freeMemory()
       
       (1 to 1000).foreach { i =>
-        val probe = testKit.createTestProbe[Command]()
+        val probe = testKit.createTestProbe[Any]()
         val message = Message(
           role = MessageRole.User,
           content = MessageContent(s"Memory test $i"),
           conversationId = s"mem-conv-${i % 10}"
         )
-        agent ! BaseAgent.ProcessMessage(message, ConversationContext(s"mem-conv-${i % 10}"), probe.ref)
+        agent ! BaseAgent.ProcessMessage(message, ConversationContext(s"mem-conv-${i % 10}"), probe.ref.unsafeUpcast[Any])
         
         if i % 100 == 0 then
           Thread.sleep(100)
