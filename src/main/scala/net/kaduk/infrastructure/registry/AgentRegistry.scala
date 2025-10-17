@@ -99,25 +99,18 @@ class AgentRegistry(using system: ActorSystem[?], ec: ExecutionContext):
   // ---------------------- Capability lookups ----------------------
   def findAgent(capability: String): Future[Option[ActorRef[BaseAgent.Command]]] =
     val id  = capability.trim.toLowerCase
-    val key = Keys.capabilityKey(id)
-    if useLocalCache then
-      ensureSubscribedCap(key, id)
-      Future.successful(capIndex.getOrElse(id, Set.empty).headOption)
-    else
-      system.receptionist
-        .ask[Receptionist.Listing](Receptionist.Find(key, _))
-        .map(_.serviceInstances(key).headOption)
+    // Strictly prefer agents registered through this registry instance (isolated per test)
+    val local = agentCaps.collect {
+      case (ref, cap) if cap.name.trim.toLowerCase == id => ref
+    }.toSeq
+    Future.successful(local.headOption)
 
   def findAllAgents(agentType: String): Future[Set[ActorRef[BaseAgent.Command]]] =
     val id  = agentType.trim.toLowerCase
-    val key = Keys.capabilityKey(id)
-    if useLocalCache then
-      ensureSubscribedCap(key, id)
-      Future.successful(capIndex.getOrElse(id, Set.empty))
-    else
-      system.receptionist
-        .ask[Receptionist.Listing](Receptionist.Find(key, _))
-        .map(_.allServiceInstances(key))
+    val local = agentCaps.collect {
+      case (ref, cap) if cap.name.trim.toLowerCase == id => ref
+    }.toSet
+    Future.successful(local)
 
   // ---------------------- Skill lookups ----------------------
   /** All agents that declare a given skill. */

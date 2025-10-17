@@ -590,10 +590,14 @@ Respond with JSON:
     s"${step.description} [stepId: ${step.id}]$ctxText"
 
   private def aggregateResults(plan: ExecutionPlan, results: Map[String, String]): String =
+    def humanStepLabel(id: String): String =
+      val m = "(?i)step-?(\\d+)".r.findFirstMatchIn(id)
+      m.map(m => s"Step ${m.group(1)}").getOrElse(id)
+
     val sortedSteps = plan.steps.sortBy(_.id)
     val sections = sortedSteps.flatMap { step =>
       results.get(step.id).map { result =>
-        s"### ${step.description}\n$result"
+        s"### [${humanStepLabel(step.id)}] ${step.description}\n$result"
       }
     }
     

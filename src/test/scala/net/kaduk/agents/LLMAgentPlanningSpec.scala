@@ -109,37 +109,70 @@ class LLMAgentPlanningSpec extends AnyWordSpec with Matchers with BeforeAndAfter
   object PlanParser:
     def parsePlan(json: String, message: Message, context: ConversationContext): Try[ExecutionPlan] =
       Try {
-        val stepsPattern = """(?s)"steps"\s*:\s*\[(.*?)\]""".r
-        val stepPattern  = """(?s)\{.*?\}""".r
-        
-        val stepsJson = stepsPattern.findFirstMatchIn(json).map(_.group(1)).getOrElse("")
-        val stepMatches = stepPattern.findAllIn(stepsJson).toSeq
-        
-        val steps = stepMatches.zipWithIndex.map { case (stepJson, idx) =>
-          val id = extractJsonField(stepJson, "id").getOrElse(s"step-$idx")
-          val desc = extractJsonField(stepJson, "description").getOrElse("Unknown step")
-          val cap = extractJsonField(stepJson, "targetCapability")
-          val skills = extractJsonArray(stepJson, "requiredSkills")
-          val deps = extractJsonArray(stepJson, "dependencies")
-          
-          PlanStep(
-            id = id,
-            description = desc,
-            requiredSkills = skills.toSet,
-            dependencies = deps.toSet,
-            targetCapability = cap
-          )
-        }
+        // Sanitize possible code fences and isolate JSON object
+        val cleaned =
+          val noFences = json
+            .replaceAll("(?i)```json", "")
+            .replaceAll("```", "")
+            .trim
+          val start = noFences.indexOf('{')
+          val end = noFences.lastIndexOf('}')
+          if start >= 0 && end >= start then noFences.substring(start, end + 1) else noFences
+
+        val mapper = new com.fasterxml.jackson.databind.ObjectMapper()
+        val root = mapper.readTree(cleaned)
+
+        def getText(n: com.fasterxml.jackson.databind.JsonNode, field: String): Option[String] =
+          if n != null && n.has(field) then Option(n.get(field)).map(_.asText()) else None
+
+        def getArrayStrings(n: com.fasterxml.jackson.databind.JsonNode, field: String): Seq[String] =
+          if n != null && n.has(field) && n.get(field).isArray then
+            val it = n.get(field).elements()
+            val buf = scala.collection.mutable.ArrayBuffer.empty[String]
+            while it.hasNext do buf += it.next().asText()
+            buf.toSeq
+          else Seq.empty
+
+        val planNode =
+          if root != null && root.has("steps") then root
+          else if root != null && root.has("plan") then root.get("plan")
+          else root
+
+        val stepsNode =
+          if planNode != null && planNode.has("steps") then planNode.get("steps") else null
+
+        val steps =
+          if stepsNode != null && stepsNode.isArray then
+            val it = stepsNode.elements()
+            val buf = scala.collection.mutable.ArrayBuffer.empty[PlanStep]
+            var idx = 0
+            while it.hasNext do
+              val s = it.next()
+              val id = getText(s, "id").getOrElse(s"step-$idx")
+              val desc = getText(s, "description").getOrElse("Unknown step")
+              val cap = getText(s, "targetCapability")
+              val skills = getArrayStrings(s, "requiredSkills").toSet
+              val deps = getArrayStrings(s, "dependencies").toSet
+
+              buf += PlanStep(
+                id = id,
+                description = desc,
+                requiredSkills = skills,
+                dependencies = deps,
+                targetCapability = cap
+              )
+              idx += 1
+            buf.toSeq
+          else Seq.empty
 
         if steps.isEmpty then
           throw new IllegalArgumentException("Invalid plan JSON: no steps parsed")
-        
-        val strategy = extractJsonField(json, "strategy") match {
+
+        val strategy = getText(planNode, "strategy").map(_.toLowerCase) match
           case Some("sequential") => ExecutionStrategy.Sequential
-          case Some("adaptive") => ExecutionStrategy.Adaptive
-          case _ => ExecutionStrategy.Parallel
-        }
-        
+          case Some("adaptive")   => ExecutionStrategy.Adaptive
+          case _                  => ExecutionStrategy.Parallel
+
         ExecutionPlan(
           conversationId = context.id,
           originalQuery = message.content.text,
