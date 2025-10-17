@@ -109,8 +109,8 @@ class LLMAgentPlanningSpec extends AnyWordSpec with Matchers with BeforeAndAfter
   object PlanParser:
     def parsePlan(json: String, message: Message, context: ConversationContext): Try[ExecutionPlan] =
       Try {
-        val stepsPattern = """"steps"\s*:\s*\[(.*?)\]""".r
-        val stepPattern = """\{[^}]+\}""".r
+        val stepsPattern = """(?s)"steps"\s*:\s*\[(.*?)\]""".r
+        val stepPattern  = """(?s)\{.*?\}""".r
         
         val stepsJson = stepsPattern.findFirstMatchIn(json).map(_.group(1)).getOrElse("")
         val stepMatches = stepPattern.findAllIn(stepsJson).toSeq
@@ -130,6 +130,9 @@ class LLMAgentPlanningSpec extends AnyWordSpec with Matchers with BeforeAndAfter
             targetCapability = cap
           )
         }
+
+        if steps.isEmpty then
+          throw new IllegalArgumentException("Invalid plan JSON: no steps parsed")
         
         val strategy = extractJsonField(json, "strategy") match {
           case Some("sequential") => ExecutionStrategy.Sequential

@@ -9,12 +9,16 @@ import net.kaduk.infrastructure.llm.LLMProvider
 import net.kaduk.infrastructure.registry.AgentRegistry
 import net.kaduk.agents.BaseAgent.*
 import net.kaduk.telemetry.UiEventBus
+import org.slf4j.LoggerFactory
 import scala.concurrent.{ExecutionContext, Future}
 import scala.util.{Success, Failure, Try}
 import scala.concurrent.duration.*
 import java.util.UUID
 
 object LLMAgent:
+
+  // Thread-safe logger for use from Future callbacks (avoid ActorContext logging off-thread)
+  private val log = LoggerFactory.getLogger("LLMAgent")
 
   // ========== Extended Protocol ==========
   
@@ -91,7 +95,7 @@ object LLMAgent:
     Behaviors.receiveMessage[Command] {
       
       case ProcessMessage(message, context, replyTo) =>
-        withLogging(ctx, context.id) {
+        BaseAgent.withLogging(ctx, context.id) {
           ctx.log.info(s"[${capability.name}] Received message ${message.id}")
           
           if planningEnabled && shouldPlan(message, context) then
@@ -100,11 +104,22 @@ object LLMAgent:
             Behaviors.same
           else
             // Direct execution (existing logic)
-            executeDirectly(message, context, replyTo, capability, provider, conversations, uiBus)
+            executeDirectly(
+              message,
+              context,
+              replyTo,
+              capability,
+              provider,
+              registry,
+              conversations,
+              uiBus,
+              planningEnabled,
+              activePlans
+            )
         }
 
       case PlanTask(message, context, replyTo) =>
-        withLogging(ctx, context.id) {
+        BaseAgent.withLogging(ctx, context.id) {
           ctx.log.info(s"[${capability.name}] Planning task for message ${message.id}")
           
           ctx.pipeToSelf(createPlan(message, context, provider, registry)) {
@@ -132,32 +147,32 @@ object LLMAgent:
         }
 
       case ExecutePlan(plan, context, replyTo) =>
-        withLogging(ctx, context.id) {
+        BaseAgent.withLogging(ctx, context.id) {
           ctx.log.info(s"[${capability.name}] Executing plan ${plan.id} with ${plan.steps.size} steps")
           
           plan.strategy match {
             case ExecutionStrategy.Sequential =>
-              executeSequential(plan, context, replyTo, capability, provider, registry, conversations, uiBus, activePlans)
+              executeSequential(plan, context, replyTo, capability, provider, registry, conversations, uiBus, activePlans, planningEnabled)
             case ExecutionStrategy.Parallel =>
-              executeParallel(plan, context, replyTo, capability, provider, registry, conversations, uiBus, activePlans)
+              executeParallel(plan, context, replyTo, capability, provider, registry, conversations, uiBus, activePlans, planningEnabled)
             case ExecutionStrategy.Adaptive =>
-              executeAdaptive(plan, context, replyTo, capability, provider, registry, conversations, uiBus, activePlans)
+              executeAdaptive(plan, context, replyTo, capability, provider, registry, conversations, uiBus, activePlans, planningEnabled)
           }
         }
 
       case StepCompleted(stepId, result, agentId) =>
         ctx.log.info(s"[${capability.name}] Step $stepId completed by $agentId")
-        uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.StepCompleted("unknown", stepId)))
+        // Conversation id not tracked here; we emit from execution paths directly.
         Behaviors.same
 
       case StepFailed(stepId, error) =>
         ctx.log.warn(s"[${capability.name}] Step $stepId failed: $error")
-        uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.ErrorEvent("unknown", s"Step $stepId failed: $error")))
+        // Conversation id not tracked here; we emit from execution paths directly.
         Behaviors.same
 
       case StreamMessage(message, context, replyTo) =>
         // Existing streaming logic (unchanged)
-        streamDirectly(message, context, replyTo, capability, provider, conversations, uiBus)
+        streamDirectly(message, context, replyTo, capability, provider, registry, conversations, uiBus, planningEnabled, activePlans)
 
       case GetStatus =>
         ctx.log.debug(s"[${capability.name}] Status: ${activePlans.size} active plans")
@@ -179,12 +194,7 @@ object LLMAgent:
   // ========== Planning Logic ==========
 
   private def shouldPlan(message: Message, context: ConversationContext): Boolean =
-    val query = message.content.text.toLowerCase
-    val planningKeywords = Set(
-      "analyze", "research", "compare", "investigate", "break down",
-      "summarize multiple", "extract from", "combine", "aggregate"
-    )
-    planningKeywords.exists(query.contains) || query.split("\\s+").length > 20
+    true
 
   private def createPlan(
     message: Message,
@@ -217,14 +227,15 @@ object LLMAgent:
     } yield PlanningResponse(plan, planJson, 0.85)
 
   private def discoverAgentCapabilities(registry: AgentRegistry)(using ec: ExecutionContext): Future[Map[String, Set[String]]] =
-    // Query all known capabilities (NER, summarization, etc.)
+    // Query a fixed set of known capabilities and include ONLY those that are actually registered
     val knownCapabilities = Seq("ner", "summarization", "translation", "sentiment", "qa")
-    
-    Future.traverse(knownCapabilities) { cap =>
-      registry.findAgent(cap).map { optRef =>
-        cap -> Set(cap) // Simplified: capability name as skill
+    Future
+      .traverse(knownCapabilities) { cap =>
+        registry.findAgent(cap).map { optRef =>
+          if optRef.isDefined then cap -> Set(cap) else cap -> Set.empty[String]
+        }
       }
-    }.map(_.toMap.filter(_._2.nonEmpty))
+      .map(_.toMap.filter(_._2.nonEmpty))
 
   private def buildPlanningPrompt(
     message: Message,
@@ -257,35 +268,71 @@ Respond with JSON:
 
   private def parsePlan(json: String, message: Message, context: ConversationContext): Try[ExecutionPlan] =
     Try {
-      // Simplified parser (production: use proper JSON library)
-      val stepsPattern = """"steps"\s*:\s*\[(.*?)\]""".r
-      val stepPattern = """\{[^}]+\}""".r
-      
-      val stepsJson = stepsPattern.findFirstMatchIn(json).map(_.group(1)).getOrElse("")
-      val stepMatches = stepPattern.findAllIn(stepsJson).toSeq
-      
-      val steps = stepMatches.zipWithIndex.map { case (stepJson, idx) =>
-        val id = extractJsonField(stepJson, "id").getOrElse(s"step-$idx")
-        val desc = extractJsonField(stepJson, "description").getOrElse("Unknown step")
-        val cap = extractJsonField(stepJson, "targetCapability")
-        val skills = extractJsonArray(stepJson, "requiredSkills")
-        val deps = extractJsonArray(stepJson, "dependencies")
-        
-        PlanStep(
-          id = id,
-          description = desc,
-          requiredSkills = skills.toSet,
-          dependencies = deps.toSet,
-          targetCapability = cap
-        )
-      }
-      
-      val strategy = extractJsonField(json, "strategy") match {
-        case Some("sequential") => ExecutionStrategy.Sequential
-        case Some("adaptive") => ExecutionStrategy.Adaptive
-        case _ => ExecutionStrategy.Parallel
-      }
-      
+      // Be tolerant to LLM formatting: strip code fences and isolate the JSON object
+      val cleaned = sanitizeJson(json)
+
+      // Use Jackson to parse JSON robustly (available transitively via pekko-serialization-jackson)
+      val mapper = new com.fasterxml.jackson.databind.ObjectMapper()
+      val root = mapper.readTree(cleaned)
+
+      def getText(n: com.fasterxml.jackson.databind.JsonNode, field: String): Option[String] =
+        if n != null && n.has(field) then Option(n.get(field)).map(_.asText()) else None
+
+      def getArrayStrings(n: com.fasterxml.jackson.databind.JsonNode, field: String): Seq[String] =
+        if n != null && n.has(field) && n.get(field).isArray then
+          val it = n.get(field).elements()
+          val buf = scala.collection.mutable.ArrayBuffer.empty[String]
+          while it.hasNext do buf += it.next().asText()
+          buf.toSeq
+        else Seq.empty
+
+      // Support either a flat plan { "steps": [...] } or nested { "plan": { "steps": [...] } }
+      val planNode =
+        if root != null && root.has("steps") then root
+        else if root != null && root.has("plan") then root.get("plan")
+        else root
+
+      val stepsNode =
+        if planNode != null && planNode.has("steps") then planNode.get("steps") else null
+
+      val steps =
+        if stepsNode != null && stepsNode.isArray then
+          val it = stepsNode.elements()
+          val buf = scala.collection.mutable.ArrayBuffer.empty[PlanStep]
+          var idx = 0
+          while it.hasNext do
+            val s = it.next()
+            val id = getText(s, "id").getOrElse(s"step-$idx")
+            val desc = getText(s, "description").getOrElse("")
+            val cap = getText(s, "targetCapability")
+            val skills = getArrayStrings(s, "requiredSkills").toSet
+            val deps = getArrayStrings(s, "dependencies").toSet
+
+            if id.trim.isEmpty || desc.trim.isEmpty then
+              throw new IllegalArgumentException("Invalid step: missing id or description")
+
+            buf += PlanStep(
+              id = id,
+              description = desc,
+              requiredSkills = skills,
+              dependencies = deps,
+              targetCapability = cap
+            )
+            idx += 1
+          buf.toSeq
+        else Seq.empty
+
+      if steps.isEmpty then
+        throw new IllegalArgumentException("Invalid plan JSON: no steps parsed")
+
+      val strategyText =
+        getText(planNode, "strategy").orElse(getText(root, "strategy")).getOrElse("parallel").toLowerCase()
+
+      val strategy = strategyText match
+        case "sequential" => ExecutionStrategy.Sequential
+        case "adaptive"   => ExecutionStrategy.Adaptive
+        case _            => ExecutionStrategy.Parallel
+
       ExecutionPlan(
         conversationId = context.id,
         originalQuery = message.content.text,
@@ -293,13 +340,15 @@ Respond with JSON:
         strategy = strategy
       )
     }
-  private def extractJsonField(json: String, field: String): Option[String] =
-    raw""""$field"\s*:\s*"([^"]+)"""".r.findFirstMatchIn(json).map(_.group(1))
 
-  private def extractJsonArray(json: String, field: String): Seq[String] =
-    raw""""$field"\s*:\s*\[(.*?)\]""".r.findFirstMatchIn(json).map { m =>
-      """"([^"]+)"""".r.findAllMatchIn(m.group(1)).map(_.group(1)).toSeq
-    }.getOrElse(Seq.empty)
+  private def sanitizeJson(json: String): String =
+    val noFences = json
+      .replaceAll("(?i)```json", "")
+      .replaceAll("```", "")
+      .trim
+    val start = noFences.indexOf('{')
+    val end = noFences.lastIndexOf('}')
+    if start >= 0 && end >= start then noFences.substring(start, end + 1) else noFences
 
   // ========== Execution Strategies ==========
 
@@ -312,43 +361,43 @@ Respond with JSON:
     registry: AgentRegistry,
     conversations: Map[String, ConversationContext],
     uiBus: Option[ActorRef[UiEventBus.Command]],
-    activePlans: Map[String, ExecutionPlan]
+    activePlans: Map[String, ExecutionPlan],
+    planningEnabled: Boolean
   )(using ctx: ActorContext[Command], ec: ExecutionContext): Behavior[Command] =
-    
-    def executeNext(remainingSteps: Seq[PlanStep], results: Map[String, String], updatedContext: ConversationContext): Unit =
-      remainingSteps.headOption match {
-        case Some(step) =>
-          ctx.log.info(s"[${capability.name}] Executing step ${step.id} sequentially")
-          
-          ctx.pipeToSelf(executeStep(step, updatedContext, results, registry, provider, uiBus)) {
-            case Success((stepResult, newContext)) =>
-              StepCompleted(step.id, stepResult, "self")
-            case Failure(ex) =>
-              StepFailed(step.id, ex.getMessage)
-          }
-          
-          // Wait for completion before continuing (handled via message processing)
-          
-        case None =>
-          // All steps complete - aggregate results
-          val finalResult = aggregateResults(plan, results)
-          val responseMsg = Message(
-            role = MessageRole.Assistant,
-            content = MessageContent(finalResult),
-            conversationId = context.id,
-            agentId = Some(ctx.self.path.name)
-          )
-          
-          ctx.log.info(s"[${capability.name}] Plan ${plan.id} completed")
-          uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.AggregateCompleted(context.id, finalResult.length)))
-          
-          replyTo ! ProcessedMessage(responseMsg, updatedContext.addMessage(responseMsg))
-      }
-    
-    executeNext(plan.steps, Map.empty, context)
-    
-    // Return behavior that handles step completion
-    processing(capability, provider, registry, conversations + (context.id -> context), replyTo, uiBus)
+    // Execute steps strictly in order, honoring dependencies as provided in the plan order.
+    val run = plan.steps.foldLeft(Future.successful((Map.empty[String, String], context))) {
+      case (accF, step) =>
+        accF.flatMap { case (accResults, ctxAcc) =>
+          executeStep(step, ctxAcc, accResults, registry, provider, uiBus)
+            .map { case (result, newCtx) =>
+              // Emit step completion to UI bus
+              uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.StepCompleted(ctxAcc.id, step.id)))
+              (accResults + (step.id -> result), newCtx)
+            }
+        }
+    }
+
+    ctx.pipeToSelf(run) {
+      case Success((results, finalCtx)) =>
+        val finalResult = aggregateResults(plan, results)
+        val responseMsg = Message(
+          role = MessageRole.Assistant,
+          content = MessageContent(finalResult),
+          conversationId = finalCtx.id,
+          agentId = Some(ctx.self.path.name)
+        )
+        uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.AggregateCompleted(finalCtx.id, finalResult.length)))
+        replyTo ! ProcessedMessage(responseMsg, finalCtx.addMessage(responseMsg))
+        NoOp
+
+      case Failure(ex) =>
+        ctx.log.error(s"[${capability.name}] Sequential execution failed", ex)
+              uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.ErrorEvent(context.id, s"Sequential failure: ${ex.getMessage}")))
+        replyTo ! ProcessingFailed(ex.getMessage, context.id)
+        NoOp
+    }
+
+    idle(capability, provider, registry, conversations + (context.id -> context), uiBus, planningEnabled, activePlans)
 
   private def executeParallel(
     plan: ExecutionPlan,
@@ -359,24 +408,37 @@ Respond with JSON:
     registry: AgentRegistry,
     conversations: Map[String, ConversationContext],
     uiBus: Option[ActorRef[UiEventBus.Command]],
-    activePlans: Map[String, ExecutionPlan]
+    activePlans: Map[String, ExecutionPlan],
+    planningEnabled: Boolean
   )(using ctx: ActorContext[Command], ec: ExecutionContext): Behavior[Command] =
     
-    // Execute independent steps in parallel
+    // Execute independent steps in parallel (no dependencies)
     val independentSteps = plan.steps.filter(_.dependencies.isEmpty)
     
     ctx.log.info(s"[${capability.name}] Executing ${independentSteps.size} steps in parallel")
     
-    val resultsFuture = Future.traverse(independentSteps.take(plan.maxParallelism)) { step =>
-      executeStep(step, context, Map.empty, registry, provider, uiBus).map { case (result, _) =>
-        step.id -> result
-      }
-    }
+    val tasks: Seq[Future[Either[(String, Throwable), (String, String)]]] =
+      independentSteps
+        .take(plan.maxParallelism)
+        .map { step =>
+          executeStep(step, context, Map.empty, registry, provider, uiBus)
+            .map { case (res, _) =>
+              // Emit step completion to UI bus
+              uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.StepCompleted(context.id, step.id)))
+              Right(step.id -> res)
+            }
+            .recover { case ex =>
+              uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.ErrorEvent(context.id, s"Step ${step.id} failure: ${ex.getMessage}")))
+              Left(step.id -> ex)
+            }
+        }
+    
+    val resultsFuture = Future.sequence(tasks)
     
     ctx.pipeToSelf(resultsFuture) {
       case Success(results) =>
-        val resultsMap = results.toMap
-        val finalResult = aggregateResults(plan, resultsMap)
+        val successes = results.collect { case Right((id, res)) => id -> res }.toMap
+        val finalResult = aggregateResults(plan, successes)
         val responseMsg = Message(
           role = MessageRole.Assistant,
           content = MessageContent(finalResult),
@@ -384,7 +446,7 @@ Respond with JSON:
           agentId = Some(ctx.self.path.name)
         )
         
-        ctx.log.info(s"[${capability.name}] Parallel execution completed")
+        ctx.log.info(s"[${capability.name}] Parallel execution completed with ${successes.size}/${independentSteps.size} successes")
         uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.AggregateCompleted(context.id, finalResult.length)))
         
         replyTo ! ProcessedMessage(responseMsg, context.addMessage(responseMsg))
@@ -392,11 +454,12 @@ Respond with JSON:
         
       case Failure(ex) =>
         ctx.log.error(s"[${capability.name}] Parallel execution failed", ex)
+        uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.ErrorEvent(context.id, ex.getMessage)))
         replyTo ! ProcessingFailed(ex.getMessage, context.id)
         NoOp
     }
     
-    processing(capability, provider, registry, conversations + (context.id -> context), replyTo, uiBus)
+    idle(capability, provider, registry, conversations + (context.id -> context), uiBus, planningEnabled, activePlans)
 
   private def executeAdaptive(
     plan: ExecutionPlan,
@@ -407,11 +470,12 @@ Respond with JSON:
     registry: AgentRegistry,
     conversations: Map[String, ConversationContext],
     uiBus: Option[ActorRef[UiEventBus.Command]],
-    activePlans: Map[String, ExecutionPlan]
+    activePlans: Map[String, ExecutionPlan],
+    planningEnabled: Boolean
   )(using ctx: ActorContext[Command], ec: ExecutionContext): Behavior[Command] =
     // Adaptive: start with parallel, fall back to sequential on contention
     ctx.log.info(s"[${capability.name}] Using adaptive strategy (defaulting to parallel)")
-    executeParallel(plan, context, replyTo, capability, provider, registry, conversations, uiBus, activePlans)
+    executeParallel(plan, context, replyTo, capability, provider, registry, conversations, uiBus, activePlans, planningEnabled)
 
   // ========== Step Execution ==========
 
@@ -424,7 +488,7 @@ Respond with JSON:
     uiBus: Option[ActorRef[UiEventBus.Command]]
   )(using ctx: ActorContext[Command], ec: ExecutionContext): Future[(String, ConversationContext)] =
     
-    ctx.log.info(s"[executeStep] Step ${step.id}: ${step.description}")
+    log.info(s"[executeStep] Step ${step.id}: ${step.description}")
     
     for {
       // 1. Find suitable agent
@@ -433,14 +497,14 @@ Respond with JSON:
       // 2. Delegate or execute locally
       result <- agentOpt match {
         case Some(agent) =>
-          ctx.log.info(s"[executeStep] Delegating step ${step.id} to agent ${agent.path.name}")
+          log.info(s"[executeStep] Delegating step ${step.id} to agent ${agent.path.name}")
           uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.StepDispatched(
             context.id, step.id, step.targetCapability.getOrElse("unknown"), step.id
           )))
           delegateToAgent(agent, step, context, priorResults)
           
         case None =>
-          ctx.log.info(s"[executeStep] No suitable agent, executing step ${step.id} locally")
+          log.info(s"[executeStep] No suitable agent, executing step ${step.id} locally")
           executeSelfContained(step, context, priorResults, provider)
       }
       
@@ -515,7 +579,7 @@ Respond with JSON:
 
   private def buildStepPrompt(step: PlanStep, priorResults: Map[String, String]): String =
     val dependencies = step.dependencies.toSeq.sorted
-    val context = if dependencies.isEmpty then ""
+    val ctxText = if dependencies.isEmpty then ""
     else {
       val depResults = dependencies.flatMap { depId =>
         priorResults.get(depId).map(res => s"[$depId]: $res")
@@ -523,7 +587,7 @@ Respond with JSON:
       s"\n\nContext from prior steps:\n$depResults\n"
     }
     
-    s"${step.description}$context"
+    s"${step.description} [stepId: ${step.id}]$ctxText"
 
   private def aggregateResults(plan: ExecutionPlan, results: Map[String, String]): String =
     val sortedSteps = plan.steps.sortBy(_.id)
@@ -549,8 +613,11 @@ Respond with JSON:
     replyTo: ActorRef[Any],
     capability: AgentCapability,
     provider: LLMProvider,
+    registry: AgentRegistry,
     conversations: Map[String, ConversationContext],
-    uiBus: Option[ActorRef[UiEventBus.Command]]
+    uiBus: Option[ActorRef[UiEventBus.Command]],
+    planningEnabled: Boolean,
+    activePlans: Map[String, ExecutionPlan]
   )(using ctx: ActorContext[Command], ec: ExecutionContext): Behavior[Command] =
     
     val stepId = message.content.metadata.getOrElse("stepId", "direct")
@@ -581,7 +648,7 @@ Respond with JSON:
         NoOp
     }
     
-    processing(capability, provider, registry = null, conversations + (context.id -> context), replyTo, uiBus)
+    idle(capability, provider, registry, conversations + (context.id -> context), uiBus, planningEnabled, activePlans)
 
   private def streamDirectly(
     message: Message,
@@ -589,8 +656,11 @@ Respond with JSON:
     replyTo: ActorRef[Any],
     capability: AgentCapability,
     provider: LLMProvider,
+    registry: AgentRegistry,
     conversations: Map[String, ConversationContext],
-    uiBus: Option[ActorRef[UiEventBus.Command]]
+    uiBus: Option[ActorRef[UiEventBus.Command]],
+    planningEnabled: Boolean,
+    activePlans: Map[String, ExecutionPlan]
   )(using ctx: ActorContext[Command], ec: ExecutionContext): Behavior[Command] =
     
     given Materializer = Materializer(ctx.system)
@@ -627,7 +697,7 @@ Respond with JSON:
         NoOp
     }
     
-    processing(capability, provider, registry = null, conversations + (context.id -> context), replyTo, uiBus)
+    idle(capability, provider, registry, conversations + (context.id -> context), uiBus, planningEnabled, activePlans)
 
   // ========== Processing State ==========
 
@@ -637,27 +707,19 @@ Respond with JSON:
     registry: AgentRegistry,
     conversations: Map[String, ConversationContext],
     pendingReply: ActorRef[?],
-    uiBus: Option[ActorRef[UiEventBus.Command]]
+    uiBus: Option[ActorRef[UiEventBus.Command]],
+    planningEnabled: Boolean,
+    activePlans: Map[String, ExecutionPlan]
   )(using ctx: ActorContext[Command], ec: ExecutionContext): Behavior[Command] =
     Behaviors.receiveMessage[Command] {
       case Stop =>
-        if registry != null then registry.deregister(ctx.self, capability)
+        registry.deregister(ctx.self, capability)
         Behaviors.stopped
 
       case NoOp =>
-        idle(capability, provider, registry, conversations, uiBus, planningEnabled = true, Map.empty)
+        idle(capability, provider, registry, conversations, uiBus, planningEnabled, activePlans)
 
       case _ =>
         ctx.log.warn(s"[${capability.name}] Ignoring message while processing")
         Behaviors.same
     }
-
-  // ========== Utility ==========
-
-  // private def withLogging[T](ctx: ActorContext[?], conversationId: String)(block: => T): T =
-  //   try block
-  //   catch {
-  //     case ex: Exception =>
-  //       ctx.log.error(s"Error in conversation $conversationId", ex)
-  //       throw ex
-  //   }
