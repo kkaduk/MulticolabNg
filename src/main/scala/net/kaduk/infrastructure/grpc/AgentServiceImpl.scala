@@ -45,7 +45,7 @@ class AgentServiceImpl(
     msg: Message,
     ctx: ConversationContext
   ): Future[Source[ChatResponse, NotUsed]] = {
-    given Timeout = 60.seconds
+    given Timeout = 360.seconds
 
     coordinatorRef.ask[Any](replyTo => BaseAgent.ProcessMessage(msg, ctx, replyTo)).map {
       case BaseAgent.ProcessedMessage(message, _) =>

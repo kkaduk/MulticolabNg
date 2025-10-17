@@ -148,7 +148,7 @@ object LLMAgent:
 
       case ExecutePlan(plan, context, replyTo) =>
         BaseAgent.withLogging(ctx, context.id) {
-          ctx.log.info(s"[${capability.name}] Executing plan ${plan.id} with ${plan.steps.size} steps")
+          ctx.log.info(s"[${capability.name}] Executing plan ${plan.id} with ${plan.steps.size} steps with ${plan.strategy} strategy")
           
           plan.strategy match {
             case ExecutionStrategy.Sequential =>
@@ -228,7 +228,8 @@ object LLMAgent:
 
   private def discoverAgentCapabilities(registry: AgentRegistry)(using ec: ExecutionContext): Future[Map[String, Set[String]]] =
     // Query a fixed set of known capabilities and include ONLY those that are actually registered
-    val knownCapabilities = Seq("ner", "summarization", "translation", "sentiment", "qa")
+    //FIXME - read from configuration (KK)
+    val knownCapabilities = Seq("creator", "critic", "finalizer", "risk")
     Future
       .traverse(knownCapabilities) { cap =>
         registry.findAgent(cap).map { optRef =>
@@ -304,7 +305,7 @@ Respond with JSON:
             val s = it.next()
             val id = getText(s, "id").getOrElse(s"step-$idx")
             val desc = getText(s, "description").getOrElse("")
-            val cap = getText(s, "targetCapability")
+            val cap = getText(s, "targetAgent")
             val skills = getArrayStrings(s, "requiredSkills").toSet
             val deps = getArrayStrings(s, "dependencies").toSet
 
@@ -516,6 +517,7 @@ Respond with JSON:
   )(using ec: ExecutionContext): Future[Option[ActorRef[BaseAgent.Command]]] =
     
     // Priority: target capability > all skills > any skill
+    log.info(s"[CAPABILITY] , my ${step.targetCapability} ")
     step.targetCapability match {
       case Some(cap) =>
         registry.findAgent(cap)
@@ -541,7 +543,7 @@ Respond with JSON:
     import org.apache.pekko.actor.typed.ActorSystem
     import org.apache.pekko.actor.typed.scaladsl.AskPattern.schedulerFromActorSystem
     import org.apache.pekko.util.Timeout
-    given Timeout = 30.seconds
+    given Timeout = 360.seconds
     given ActorSystem[?] = ctx.system
     
     val enrichedPrompt = buildStepPrompt(step, priorResults)

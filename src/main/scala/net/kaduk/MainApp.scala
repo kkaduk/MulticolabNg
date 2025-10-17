@@ -1,10 +1,12 @@
 package net.kaduk
 
 import org.apache.pekko.actor.typed.ActorSystem
+import org.apache.pekko.actor.typed.ActorRef
 import org.apache.pekko.actor.typed.scaladsl.Behaviors
 import org.apache.pekko.http.scaladsl.Http
 import org.apache.pekko.http.scaladsl.model.{HttpRequest, HttpResponse}
-import net.kaduk.agents.{CoordinatorAgent, LLMAgent}
+import net.kaduk.agents.{LLMAgent}
+import net.kaduk.agents.BaseAgent
 import net.kaduk.infrastructure.llm.{OpenAIProvider, ClaudeProvider, OllamaProvider, VertexProvider}
 import net.kaduk.infrastructure.registry.AgentRegistry
 import net.kaduk.infrastructure.grpc.AgentServiceImpl
@@ -25,12 +27,9 @@ object MainApp:
       val config = AppConfig.load()
       val registry = AgentRegistry()
       val uiBus    = ctx.spawn(UiEventBus(), "ui-bus")
-      
+      var agentMainOpt: Option[ActorRef[BaseAgent.Command]] = None
       // Spawn LLM agents
       config.agents.foreach: (name, agentConfig) =>
-        if agentConfig.agentType == "llm" then
-          ctx.log.info(s"Spawning LLM agent: $name")
-          
           val providerConfig = config.llmProviders(agentConfig.provider)
           val provider = agentConfig.provider match
             case "openai" => OpenAIProvider(providerConfig.apiKey, providerConfig.model)
@@ -50,17 +49,27 @@ object MainApp:
             provider = agentConfig.provider,
             config = Map("systemPrompt" -> agentConfig.systemPrompt)
           )
-
-          val agentRef = ctx.spawn(LLMAgent(capability, provider, registry, Some(uiBus)), actorName)
+          if agentConfig.agentType == "llm" then
+            ctx.log.info(s"Spawning LLM agent: $name")
+            val agentRef = ctx.spawn(LLMAgent(capability, provider, registry, Some(uiBus),false), actorName)
+          if agentConfig.agentType == "llm-main" then
+            ctx.log.info(s"Spawning LLM-coordinator agent: $name")
+            agentMainOpt = Some(ctx.spawn(LLMAgent(capability, provider, registry, Some(uiBus)), actorName))
+        
           
 
       
+      val mainAgent = agentMainOpt.getOrElse {
+        ctx.log.error("No llm-main agent configured in application.conf")
+        throw new IllegalStateException("No llm-main agent configured")
+      }
+      
       // Spawn coordinator
-      val coordinatorRef = ctx.spawn(CoordinatorAgent(registry, Some(uiBus)), "coordinator")
+      // val coordinatorRef = ctx.spawn(CoordinatorAgent(registry, Some(uiBus)), "coordinator")
       
       // Start gRPC server
       val service: HttpRequest => Future[HttpResponse] =
-        AgentServiceHandler(AgentServiceImpl(coordinatorRef))
+        AgentServiceHandler(AgentServiceImpl(mainAgent))
       
       Http().newServerAt("0.0.0.0", 6060).bind(service).onComplete:
         case Success(binding) =>
@@ -70,7 +79,7 @@ object MainApp:
           ctx.system.terminate()
       
       // UI WebSocket + demo trigger server (ws://localhost:6061/ws, GET /demo)
-      Http().newServerAt("0.0.0.0", 6061).bind(TelemetryRoutes.routes(uiBus, coordinatorRef)).onComplete:
+      Http().newServerAt("0.0.0.0", 6061).bind(TelemetryRoutes.routes(uiBus, mainAgent)).onComplete:
         case Success(binding) =>
           ctx.system.log.info(s"UI server bound to ${binding.localAddress}")
         case Failure(ex) =>
