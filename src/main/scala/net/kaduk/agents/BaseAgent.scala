@@ -7,7 +7,7 @@ import org.slf4j.MDC
 
 object BaseAgent:
   
-  sealed trait Command
+  trait Command
   case class ProcessMessage(
     message: Message,
     context: ConversationContext,

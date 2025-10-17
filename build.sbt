@@ -52,7 +52,12 @@ lazy val root = project
       "org.apache.pekko" %% "pekko-stream-testkit" % pekkoVersion % Test,
       "org.apache.pekko" %% "pekko-http-testkit" % pekkoHttpVersion % Test,
       "org.scalatest" %% "scalatest" % "3.2.17" % Test,
-      "org.scalatestplus" %% "mockito-4-11" % "3.2.17.0" % Test
+      "org.scalatestplus" %% "mockito-4-11" % "3.2.17.0" % Test,
+
+      "org.openjdk.jmh" % "jmh-core" % "1.37",
+      "org.openjdk.jmh" % "jmh-generator-annprocess" % "1.37"
+
+
     ),
     
     scalacOptions ++= Seq(

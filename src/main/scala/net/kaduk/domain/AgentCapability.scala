@@ -1,7 +1,7 @@
 package net.kaduk.domain
 
 enum AgentType:
-  case LLM, Tool, Coordinator, Human
+  case LLM, Tool, Coordinator, Human, Worker, Specialist, Orchestrator, Monitor
 
 case class AgentCapability(
   name: String,
