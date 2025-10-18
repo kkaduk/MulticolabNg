@@ -86,7 +86,9 @@ The **Agent Registry** (`net.kaduk.infrastructure.registry.AgentRegistry`) abst
 This registry design means the coordinator can discover specialised agents on demand.  For example, if a plan step declares `targetCapability = "critic"` then the registry will return the first available critic agent.  If no agent matches exactly, the registry falls back to skill‑based search: `findAgentsByAllSkills(Set("ner", "sentiment"))` returns an agent whose skill set is a superset of the required skills.  These functions return `Future[Option[ActorRef]]` or `Future[Set[ActorRef]]` to avoid blocking the actor.
 
 
+
 ## 6 LLMAgent Planning and Execution
+
 
 The **LLMAgent** is the heart of the system.  Each agent wraps an `LLMProvider`, exposes the `BaseAgent` protocol and optionally enables **planning**.  With planning enabled the coordinator (the `llm‑main` agent) implements a plan‑and‑execute loop inspired by recent research on LLM‑driven agents:contentReference[oaicite:3]{index=3}.  The flow is:
 
@@ -101,7 +103,9 @@ The **LLMAgent** is the heart of the system.  Each agent wraps an `LLMProvider`,
 
 Fallbacks ensure robustness: if planning fails the agent executes the request directly; if no specialised agent is found for a step the LLM provider processes the step; if a step fails, the error is reported and execution continues (parallel strategy) or aborts (sequential strategy).
 
+
 ## 7 Telemetry and UI
+
 
 Real‑time observability is provided via a **UI event bus** and **WebSocket routes**.  The `UiEventBus` defines events describing planning, execution and errors.  Producers publish events via `UiEventBus.Publish`; subscribers register with `UiEventBus.Subscribe`.  The bus maintains a rolling history (last 500 events) and replays it to new subscribers.  Events include:
 
@@ -117,7 +121,9 @@ Real‑time observability is provided via a **UI event bus** and **WebSocket rou
 
 `TelemetryRoutes` exposes these events over **WebSocket** at `/ws`.  Each client connection spawns a subscriber actor and an internal queue that buffers up to 512 messages.  The server merges the event stream with a 10‑second ping (to keep connections alive) and serialises events using the `UiEventBus.toJson` helper.  Clients may also trigger a demo by sending an HTTP `GET /demo?task=...&convId=...`: the server sends the task to the coordinator and returns immediately.  A simple `/health` endpoint returns `ok` for liveness checks.
 
+
 ## 8 gRPC Service
+
 
 `AgentServiceImpl` implements the `AgentService` defined in `src/main/protobuf/agent_service.proto`.  The service exposes two methods:
 
@@ -126,7 +132,9 @@ Real‑time observability is provided via a **UI event bus** and **WebSocket rou
 
 The gRPC server binds to port 6060 in `MainApp`, enabling clients (e.g., a JavaScript UI) to interact with the system over HTTP/2.
 
+
 ## 9 Configuration and Bootstrap
+
 
 Configuration resides in `application.conf` and `dev.conf`.  Key parameters include Pekko cluster settings, HTTP server options and LLM provider credentials (OpenAI API key, model names, etc.).  Agents are defined under `agents { … }` with fields `provider`, `agentType` (`llm` or `llm-main`), `capability`, `skills`, `systemPrompt` and custom names.  For example, a creator agent might be configured as:
 
