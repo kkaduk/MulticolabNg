@@ -73,7 +73,8 @@ All agents extend the **BaseAgent** trait in `net.kaduk.agents`.  The protocol d
 
 The `withLogging` helper enriches MDC logging context with the conversation ID and agent ID, ensuring logs are annotated consistently.
 
-## 5 Agent Registry and Discovery
+
+## 5 Agent Registry and Discovery
 
 The **Agent Registry** (`net.kaduk.infrastructure.registry.AgentRegistry`) abstracts the underlying Pekko Receptionist and provides a uniform API for registering, deregistering and discovering agents.  When an agent starts it calls `registry.register(selfRef, capability, skills)`, which:
 
@@ -83,6 +84,7 @@ The **Agent Registry** (`net.kaduk.infrastructure.registry.AgentRegistry`) abst
 * Deregistration removes the actor from both the receptionist and the cache.
 
 This registry design means the coordinator can discover specialised agents on demand.  For example, if a plan step declares `targetCapability = "critic"` then the registry will return the first available critic agent.  If no agent matches exactly, the registry falls back to skill‑based search: `findAgentsByAllSkills(Set("ner", "sentiment"))` returns an agent whose skill set is a superset of the required skills.  These functions return `Future[Option[ActorRef]]` or `Future[Set[ActorRef]]` to avoid blocking the actor.
+
 
 ## 6 LLMAgent Planning and Execution
 
