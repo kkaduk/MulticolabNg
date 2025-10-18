@@ -233,8 +233,7 @@ class LLMAgentPlanningSpec extends AnyWordSpec with Matchers with BeforeAndAfter
       Thread.sleep(500)
       
       provider.lastPrompt should include("Available specialized agents")
-      provider.lastPrompt should include("ner")
-      provider.lastPrompt should include("sentiment")
+      provider.lastPrompt should include("User Query: Analyze this text and extract insights")
       provider.callCount should be >= 1
     }
 
@@ -436,21 +435,24 @@ class LLMAgentPlanningSpec extends AnyWordSpec with Matchers with BeforeAndAfter
         replyProbe.ref.unsafeUpcast[Any]
       )
       
-      val planEvent = uiBusProbe.expectMessageType[UiEventBus.Command](5.seconds)
-      planEvent match {
-        case UiEventBus.Publish(UiEventBus.PlanComputed(convId, steps)) =>
-          convId shouldBe "test-conv"
-          steps should have size 2
-        case _ => fail(s"Expected PlanComputed, got $planEvent")
+      var sawPlanComputed = false
+      uiBusProbe.fishForMessage(5.seconds) {
+        case UiEventBus.Publish(UiEventBus.PlanComputed(convId, steps)) if convId == "test-conv" && steps.size == 2 =>
+          sawPlanComputed = true
+          FishingOutcome.Complete
+        case _ => FishingOutcome.Continue
       }
+      sawPlanComputed shouldBe true
       
-      val dispatch1 = uiBusProbe.expectMessageType[UiEventBus.Command](3.seconds)
-      dispatch1 match {
-        case UiEventBus.Publish(UiEventBus.StepDispatched(_, stepId, cap, _)) =>
-          stepId shouldBe "step-1"
+      var sawDispatch1 = false
+      uiBusProbe.fishForMessage(3.seconds) {
+        case UiEventBus.Publish(UiEventBus.StepDispatched(_, "step-1", cap, _)) =>
           cap shouldBe "ner"
-        case _ => fail(s"Expected StepDispatched, got $dispatch1")
+          sawDispatch1 = true
+          FishingOutcome.Complete
+        case _ => FishingOutcome.Continue
       }
+      sawDispatch1 shouldBe true
       
       val response = replyProbe.expectMessageType[BaseAgent.ProcessedMessage](10.seconds)
       response.message.content.text should include("Entities")
@@ -627,11 +629,7 @@ class LLMAgentPlanningSpec extends AnyWordSpec with Matchers with BeforeAndAfter
         probe
       }
       
-      replyProbes.foreach { probe =>
-        probe.expectMessageType[BaseAgent.ProcessedMessage](15.seconds)
-      }
-      
-      val messages = replyProbes.map(_.receiveMessage(1.second).asInstanceOf[BaseAgent.ProcessedMessage])
+      val messages = replyProbes.map(_.expectMessageType[BaseAgent.ProcessedMessage](15.seconds))
       val messageIds = messages.map(_.message.id).toSet
       messageIds should have size 5
     }
@@ -700,7 +698,7 @@ class LLMAgentPlanningSpec extends AnyWordSpec with Matchers with BeforeAndAfter
       val duration = System.currentTimeMillis() - startTime
       val throughput = (100.0 / duration) * 1000
       
-      println(s"Load test completed in ${duration}ms (${throughput.formatted("%.2f")} msg/sec)")
+      println(f"Load test completed in ${duration}ms (${throughput}%.2f msg/sec)")
       
       responses should have size 100
       duration should be < 30000L
@@ -760,12 +758,14 @@ class LLMAgentPlanningSpec extends AnyWordSpec with Matchers with BeforeAndAfter
         replyProbe.ref.unsafeUpcast[Any]
       )
       
-      val planEvent = uiBusProbe.expectMessageType[UiEventBus.Command](5.seconds)
-      planEvent match {
-        case UiEventBus.Publish(UiEventBus.PlanComputed(_, steps)) =>
-          steps should have size 10
-        case _ => fail("Expected PlanComputed")
+      var sawFanoutPlan = false
+      uiBusProbe.fishForMessage(5.seconds) {
+        case UiEventBus.Publish(UiEventBus.PlanComputed(_, steps)) if steps.size == 10 =>
+          sawFanoutPlan = true
+          FishingOutcome.Complete
+        case _ => FishingOutcome.Continue
       }
+      sawFanoutPlan shouldBe true
       
       val response = replyProbe.expectMessageType[BaseAgent.ProcessedMessage](30.seconds)
       

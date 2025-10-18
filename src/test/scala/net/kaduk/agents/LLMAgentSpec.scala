@@ -20,7 +20,13 @@ class LLMAgentSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike:
       Source.single(StreamToken("Mock response", "test-id", isComplete = true))
     
     override def completion(messages: Seq[Message], systemPrompt: String): Future[String] =
-      Future.successful("Mock completion response")
+      val last = messages.lastOption.map(_.content.text).getOrElse("")
+      if last.contains("Decompose this task") then
+        Future.successful("""{"steps":[{"id":"step-1","description":"Do X","requiredSkills":["x"],"targetAgent":"x","dependencies":[]}],"strategy":"sequential"}""")
+      else if last.contains("stepId") then
+        Future.successful("Step result")
+      else
+        Future.successful("Mock completion response")
     
     override def close(): Future[Unit] = Future.successful(())
 
@@ -35,7 +41,7 @@ class LLMAgentSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike:
       
       val provider = MockLLMProvider()
       val registry = AgentRegistry()(using system, summon[scala.concurrent.ExecutionContext])
-      val agent = spawn(LLMAgent(capability, provider, registry))
+      val agent = spawn(LLMAgent(capability, provider, registry, None, planningEnabled = false))
       val probe = createTestProbe[BaseAgent.Response]()
       
       val message = Message(
@@ -61,7 +67,7 @@ class LLMAgentSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike:
 
       val provider = MockLLMProvider()
       val registry = AgentRegistry()(using system, summon[scala.concurrent.ExecutionContext])
-      val agent = spawn(LLMAgent(capability, provider, registry))
+      val agent = spawn(LLMAgent(capability, provider, registry, None, planningEnabled = false))
       val probe = createTestProbe[BaseAgent.Response]()
 
       val ctx1 = ConversationContext("conv-1")
@@ -88,7 +94,7 @@ class LLMAgentSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike:
 
       val provider = MockLLMProvider()
       val registry = AgentRegistry()(using system, summon[scala.concurrent.ExecutionContext])
-      val agent = spawn(LLMAgent(capability, provider, registry))
+      val agent = spawn(LLMAgent(capability, provider, registry, None, planningEnabled = false))
       val probe = createTestProbe[BaseAgent.Response]()
       val sProbe = createTestProbe[BaseAgent.StreamResponse]()
 
@@ -119,7 +125,7 @@ class LLMAgentSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike:
 
       val provider = MockLLMProvider()
       val registry = AgentRegistry()(using system, summon[scala.concurrent.ExecutionContext])
-      val agent = spawn(LLMAgent(capability, provider, registry))
+      val agent = spawn(LLMAgent(capability, provider, registry, None, planningEnabled = false))
       val termProbe = createTestProbe[Nothing]()
 
       agent ! BaseAgent.Stop

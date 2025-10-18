@@ -1224,6 +1224,18 @@ Output only JSON — nothing else.
 
     stream.runForeach { token =>
       replyTo ! StreamChunk(token.content, token.messageId)
+      if token.content.nonEmpty then
+        uiBus.foreach(
+          _ ! UiEventBus.Publish(
+            UiEventBus.ChatMessage(
+              context.id,
+              MessageRole.Assistant.toString,
+              token.messageId,
+              token.content,
+              Some(ctx.self.path.name)
+            )
+          )
+        )
     }
 
     ctx.pipeToSelf(stream.runWith(Sink.fold("")(_ + _.content))) {
