@@ -21,55 +21,58 @@ object LLMAgent:
   private val log = LoggerFactory.getLogger("LLMAgent")
 
   // ========== Extended Protocol ==========
-  
+
   sealed trait InternalCommand extends Command
-  
+
   case class PlanTask(
-    message: Message,
-    context: ConversationContext,
-    replyTo: ActorRef[Any]
+      message: Message,
+      context: ConversationContext,
+      replyTo: ActorRef[Any]
   ) extends InternalCommand
-  
+
   case class ExecutePlan(
-    plan: ExecutionPlan,
-    context: ConversationContext,
-    replyTo: ActorRef[Any]
+      plan: ExecutionPlan,
+      context: ConversationContext,
+      replyTo: ActorRef[Any]
   ) extends InternalCommand
-  
+
   case class StepCompleted(
-    stepId: String,
-    result: String,
-    agentId: String
+      stepId: String,
+      result: String,
+      agentId: String
   ) extends InternalCommand
-  
+
   case class StepFailed(
-    stepId: String,
-    error: String
+      stepId: String,
+      error: String
   ) extends InternalCommand
-  
+
   case class AgentDiscoveryResult(
-    stepId: String,
-    agents: Set[ActorRef[BaseAgent.Command]]
+      stepId: String,
+      agents: Set[ActorRef[BaseAgent.Command]]
   ) extends InternalCommand
 
   // ========== Actor Factory ==========
 
   def apply(
-    capability: AgentCapability,
-    provider: LLMProvider,
-    registry: AgentRegistry,
-    uiBus: Option[ActorRef[UiEventBus.Command]] = None,
-    planningEnabled: Boolean = true
+      capability: AgentCapability,
+      provider: LLMProvider,
+      registry: AgentRegistry,
+      uiBus: Option[ActorRef[UiEventBus.Command]] = None,
+      planningEnabled: Boolean = true
   )(using ec: ExecutionContext): Behavior[Command] =
     Behaviors.setup { ctx =>
       given ActorContext[Command] = ctx
-      
+
       // Register with extended skills
-      val skills = capability.skills ++ Set("planning", "reasoning", "orchestration")
+      val skills =
+        capability.skills ++ Set("planning", "reasoning", "orchestration")
       registry.register(ctx.self, capability.copy(skills = skills), skills)
-      
-      ctx.log.info(s"[${capability.name}] Initialized with planning=${planningEnabled}, skills=${skills.mkString(",")}")
-      
+
+      ctx.log.info(
+        s"[${capability.name}] Initialized with planning=${planningEnabled}, skills=${skills.mkString(",")}"
+      )
+
       idle(
         capability,
         provider,
@@ -84,22 +87,32 @@ object LLMAgent:
   // ========== State: Idle ==========
 
   private def idle(
-    capability: AgentCapability,
-    provider: LLMProvider,
-    registry: AgentRegistry,
-    conversations: Map[String, ConversationContext],
-    uiBus: Option[ActorRef[UiEventBus.Command]],
-    planningEnabled: Boolean,
-    activePlans: Map[String, ExecutionPlan]
+      capability: AgentCapability,
+      provider: LLMProvider,
+      registry: AgentRegistry,
+      conversations: Map[String, ConversationContext],
+      uiBus: Option[ActorRef[UiEventBus.Command]],
+      planningEnabled: Boolean,
+      activePlans: Map[String, ExecutionPlan]
   )(using ctx: ActorContext[Command], ec: ExecutionContext): Behavior[Command] =
     Behaviors.receiveMessage[Command] {
-      
+
       case ProcessMessage(message, context, replyTo) =>
         BaseAgent.withLogging(ctx, context.id) {
           ctx.log.info(s"[${capability.name}] Received message ${message.id}")
-          
-          uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.ChatMessage(context.id, message.role.toString, message.id, message.content.text, message.agentId)))
-          
+
+          uiBus.foreach(
+            _ ! UiEventBus.Publish(
+              UiEventBus.ChatMessage(
+                context.id,
+                message.role.toString,
+                message.id,
+                message.content.text,
+                message.agentId
+              )
+            )
+          )
+
           if planningEnabled && shouldPlan(message, context) then
             ctx.log.info(s"[${capability.name}] Initiating planning phase")
             ctx.self ! PlanTask(message, context, replyTo)
@@ -122,8 +135,10 @@ object LLMAgent:
 
       case PlanTask(message, context, replyTo) =>
         BaseAgent.withLogging(ctx, context.id) {
-          ctx.log.info(s"[${capability.name}] Planning task for message ${message.id}")
-          
+          ctx.log.info(
+            s"[${capability.name}] Planning task for message ${message.id}"
+          )
+
           uiBus.foreach { bus =>
             val stateMsg = Message(
               role = MessageRole.System,
@@ -131,55 +146,128 @@ object LLMAgent:
               conversationId = context.id,
               agentId = Some(capability.name)
             )
-            bus ! UiEventBus.Publish(UiEventBus.ChatMessage(context.id, stateMsg.role.toString, stateMsg.id, stateMsg.content.text, stateMsg.agentId))
+            bus ! UiEventBus.Publish(
+              UiEventBus.ChatMessage(
+                context.id,
+                stateMsg.role.toString,
+                stateMsg.id,
+                stateMsg.content.text,
+                stateMsg.agentId
+              )
+            )
           }
-          
-          ctx.pipeToSelf(createPlan(message, context, provider, registry, uiBus, capability)) {
+
+          ctx.pipeToSelf(
+            createPlan(message, context, provider, registry, uiBus, capability)
+          ) {
             case Success(planResp) =>
-              ctx.log.info(s"[${capability.name}] Plan created: ${planResp.plan.steps.size} steps, confidence=${planResp.confidence}")
-              
+              ctx.log.info(
+                s"[${capability.name}] Plan created: ${planResp.plan.steps.size} steps, confidence=${planResp.confidence}"
+              )
+
               // Emit plan to UI
               uiBus.foreach { bus =>
                 val stepInfos = planResp.plan.steps.map { s =>
-                  UiEventBus.StepInfo(s.id, s.targetCapability.getOrElse("unknown"), s.dependencies.toSeq)
+                  UiEventBus.StepInfo(
+                    s.id,
+                    s.targetCapability.getOrElse("unknown"),
+                    s.dependencies.toSeq
+                  )
                 }
-                bus ! UiEventBus.Publish(UiEventBus.PlanComputed(context.id, stepInfos))
+                bus ! UiEventBus.Publish(
+                  UiEventBus.PlanComputed(context.id, stepInfos)
+                )
               }
-              
+
               ExecutePlan(planResp.plan, context, replyTo)
-              
+
             case Failure(ex) =>
-              ctx.log.error(s"[${capability.name}] Planning failed: ${ex.getMessage}", ex)
-              uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.ErrorEvent(context.id, s"Planning failed: ${ex.getMessage}")))
+              ctx.log.error(
+                s"[${capability.name}] Planning failed: ${ex.getMessage}",
+                ex
+              )
+              uiBus.foreach(
+                _ ! UiEventBus.Publish(
+                  UiEventBus.ErrorEvent(
+                    context.id,
+                    s"Planning failed: ${ex.getMessage}"
+                  )
+                )
+              )
               // Fall back to direct execution
               ProcessMessage(message, context, replyTo)
           }
-          
+
           Behaviors.same
         }
 
       case ExecutePlan(plan, context, replyTo) =>
         BaseAgent.withLogging(ctx, context.id) {
-          ctx.log.info(s"[${capability.name}] Executing plan ${plan.id} with ${plan.steps.size} steps with ${plan.strategy} strategy")
-          
+          ctx.log.info(
+            s"[${capability.name}] Executing plan ${plan.id} with ${plan.steps.size} steps with ${plan.strategy} strategy"
+          )
+
           // Publish state to UI
           uiBus.foreach { bus =>
             val stateMsg = Message(
               role = MessageRole.System,
-              content = MessageContent(s"Executing plan ${plan.id} with ${plan.steps.size} steps using ${plan.strategy} strategy"),
+              content = MessageContent(
+                s"Executing plan ${plan.id} with ${plan.steps.size} steps using ${plan.strategy} strategy"
+              ),
               conversationId = context.id,
               agentId = Some(capability.name)
             )
-            bus ! UiEventBus.Publish(UiEventBus.ChatMessage(context.id, stateMsg.role.toString, stateMsg.id, stateMsg.content.text, stateMsg.agentId))
+            bus ! UiEventBus.Publish(
+              UiEventBus.ChatMessage(
+                context.id,
+                stateMsg.role.toString,
+                stateMsg.id,
+                stateMsg.content.text,
+                stateMsg.agentId
+              )
+            )
           }
-          
+
           plan.strategy match {
             case ExecutionStrategy.Sequential =>
-              executeSequential(plan, context, replyTo, capability, provider, registry, conversations, uiBus, activePlans, planningEnabled)
+              executeSequential(
+                plan,
+                context,
+                replyTo,
+                capability,
+                provider,
+                registry,
+                conversations,
+                uiBus,
+                activePlans,
+                planningEnabled
+              )
             case ExecutionStrategy.Parallel =>
-              executeParallel(plan, context, replyTo, capability, provider, registry, conversations, uiBus, activePlans, planningEnabled)
+              executeParallel(
+                plan,
+                context,
+                replyTo,
+                capability,
+                provider,
+                registry,
+                conversations,
+                uiBus,
+                activePlans,
+                planningEnabled
+              )
             case ExecutionStrategy.Adaptive =>
-              executeAdaptive(plan, context, replyTo, capability, provider, registry, conversations, uiBus, activePlans, planningEnabled)
+              executeAdaptive(
+                plan,
+                context,
+                replyTo,
+                capability,
+                provider,
+                registry,
+                conversations,
+                uiBus,
+                activePlans,
+                planningEnabled
+              )
           }
         }
 
@@ -195,10 +283,23 @@ object LLMAgent:
 
       case StreamMessage(message, context, replyTo) =>
         // Existing streaming logic (unchanged)
-        streamDirectly(message, context, replyTo, capability, provider, registry, conversations, uiBus, planningEnabled, activePlans)
+        streamDirectly(
+          message,
+          context,
+          replyTo,
+          capability,
+          provider,
+          registry,
+          conversations,
+          uiBus,
+          planningEnabled,
+          activePlans
+        )
 
       case GetStatus =>
-        ctx.log.debug(s"[${capability.name}] Status: ${activePlans.size} active plans")
+        ctx.log.debug(
+          s"[${capability.name}] Status: ${activePlans.size} active plans"
+        )
         Behaviors.same
 
       case Stop =>
@@ -216,26 +317,31 @@ object LLMAgent:
 
   // ========== Planning Logic ==========
 
-  private def shouldPlan(message: Message, context: ConversationContext): Boolean =
+  private def shouldPlan(
+      message: Message,
+      context: ConversationContext
+  ): Boolean =
     true
 
   private def createPlan(
-    message: Message,
-    context: ConversationContext,
-    provider: LLMProvider,
-    registry: AgentRegistry,
-    uiBus: Option[ActorRef[UiEventBus.Command]],
-    capability: AgentCapability
+      message: Message,
+      context: ConversationContext,
+      provider: LLMProvider,
+      registry: AgentRegistry,
+      uiBus: Option[ActorRef[UiEventBus.Command]],
+      capability: AgentCapability
   )(using ec: ExecutionContext): Future[PlanningResponse] =
     for {
       // Discover available agents
       agentSkillsMap <- discoverAgentCapabilities(registry)
-      
+
       // Generate plan via LLM
       planPrompt = buildPlanningPrompt(message, context, agentSkillsMap)
       sysMsg = Message(
         role = MessageRole.System,
-        content = MessageContent("You are a task planning expert. Respond ONLY with valid JSON."),
+        content = MessageContent(
+          "You are a task planning expert. Respond ONLY with valid JSON."
+        ),
         conversationId = context.id
       )
       userMsg = Message(
@@ -244,8 +350,24 @@ object LLMAgent:
         conversationId = context.id
       )
       _ = uiBus.foreach { bus =>
-        bus ! UiEventBus.Publish(UiEventBus.ChatMessage(context.id, sysMsg.role.toString, sysMsg.id, sysMsg.content.text, Some(capability.name)))
-        bus ! UiEventBus.Publish(UiEventBus.ChatMessage(context.id, userMsg.role.toString, userMsg.id, userMsg.content.text, Some(capability.name)))
+        bus ! UiEventBus.Publish(
+          UiEventBus.ChatMessage(
+            context.id,
+            sysMsg.role.toString,
+            sysMsg.id,
+            sysMsg.content.text,
+            Some(capability.name)
+          )
+        )
+        bus ! UiEventBus.Publish(
+          UiEventBus.ChatMessage(
+            context.id,
+            userMsg.role.toString,
+            userMsg.id,
+            userMsg.content.text,
+            Some(capability.name)
+          )
+        )
       }
       planJson <- provider.completion(
         Seq(sysMsg, userMsg),
@@ -259,17 +381,27 @@ object LLMAgent:
           conversationId = context.id,
           agentId = Some(capability.name)
         )
-        bus ! UiEventBus.Publish(UiEventBus.ChatMessage(context.id, planMsg.role.toString, planMsg.id, planMsg.content.text, planMsg.agentId))
+        bus ! UiEventBus.Publish(
+          UiEventBus.ChatMessage(
+            context.id,
+            planMsg.role.toString,
+            planMsg.id,
+            planMsg.content.text,
+            planMsg.agentId
+          )
+        )
       }
-      
+
       // Parse plan
       plan <- Future.fromTry(parsePlan(planJson, message, context))
-      
+
     } yield PlanningResponse(plan, planJson, 0.85)
 
-  private def discoverAgentCapabilities(registry: AgentRegistry)(using ec: ExecutionContext): Future[Map[String, Set[String]]] =
+  private def discoverAgentCapabilities(registry: AgentRegistry)(using
+      ec: ExecutionContext
+  ): Future[Map[String, Set[String]]] =
     // Query a fixed set of known capabilities and include ONLY those that are actually registered
-    //FIXME - read from configuration (KK)
+    // FIXME - read from configuration (KK)
     val knownCapabilities = Seq("creator", "critic", "finalizer", "risk")
     Future
       .traverse(knownCapabilities) { cap =>
@@ -280,20 +412,25 @@ object LLMAgent:
       .map(_.toMap.filter(_._2.nonEmpty))
 
   private def buildPlanningPrompt(
-    message: Message,
-    context: ConversationContext,
-    availableAgents: Map[String, Set[String]]
+      message: Message,
+      context: ConversationContext,
+      availableAgents: Map[String, Set[String]]
   ): String =
-    val agentsList = availableAgents.map { case (cap, skills) =>
-      s"- $cap: ${skills.mkString(", ")}"
-    }.mkString("\n")
-    
+    val agentsList = availableAgents
+      .map { case (cap, skills) =>
+        s"- $cap: ${skills.mkString(", ")}"
+      }
+      .mkString("\n")
+
     s"""Decompose this task into executable steps. Available specialized agents:
 $agentsList
 
 User Query: ${message.content.text}
 
-Respond with JSON:
+You are a precise JSON generator. 
+Return **only** valid JSON — no explanations, no markdown, no comments.
+
+Generate a JSON object with the following structure:
 {
   "steps": [
     {
@@ -306,9 +443,18 @@ Respond with JSON:
   ],
   "strategy": "parallel",
   "reasoning": "Why this plan"
-}"""
+}
 
-  private def parsePlan(json: String, message: Message, context: ConversationContext): Try[ExecutionPlan] =
+Use double quotes for all keys and string values.
+Output only JSON — nothing else.
+
+"""
+
+  private def parsePlan(
+      json: String,
+      message: Message,
+      context: ConversationContext
+  ): Try[ExecutionPlan] =
     Try {
       // Be tolerant to LLM formatting: strip code fences and isolate the JSON object
       val cleaned = sanitizeJson(json)
@@ -317,10 +463,17 @@ Respond with JSON:
       val mapper = new com.fasterxml.jackson.databind.ObjectMapper()
       val root = mapper.readTree(cleaned)
 
-      def getText(n: com.fasterxml.jackson.databind.JsonNode, field: String): Option[String] =
-        if n != null && n.has(field) then Option(n.get(field)).map(_.asText()) else None
+      def getText(
+          n: com.fasterxml.jackson.databind.JsonNode,
+          field: String
+      ): Option[String] =
+        if n != null && n.has(field) then Option(n.get(field)).map(_.asText())
+        else None
 
-      def getArrayStrings(n: com.fasterxml.jackson.databind.JsonNode, field: String): Seq[String] =
+      def getArrayStrings(
+          n: com.fasterxml.jackson.databind.JsonNode,
+          field: String
+      ): Seq[String] =
         if n != null && n.has(field) && n.get(field).isArray then
           val it = n.get(field).elements()
           val buf = scala.collection.mutable.ArrayBuffer.empty[String]
@@ -335,7 +488,8 @@ Respond with JSON:
         else root
 
       val stepsNode =
-        if planNode != null && planNode.has("steps") then planNode.get("steps") else null
+        if planNode != null && planNode.has("steps") then planNode.get("steps")
+        else null
 
       val steps =
         if stepsNode != null && stepsNode.isArray then
@@ -346,12 +500,18 @@ Respond with JSON:
             val s = it.next()
             val id = getText(s, "id").getOrElse(s"step-$idx")
             val desc = getText(s, "description").getOrElse("")
-            val cap = getText(s, "targetAgent")
+            // val cap = getText(s, "targetAgent")
+
+            val cap = getText(s, "targetAgent").orElse(getText(s, "agent"))
+                      .orElse(getText(s, "targetCapability"))
+
             val skills = getArrayStrings(s, "requiredSkills").toSet
             val deps = getArrayStrings(s, "dependencies").toSet
 
             if id.trim.isEmpty || desc.trim.isEmpty then
-              throw new IllegalArgumentException("Invalid step: missing id or description")
+              throw new IllegalArgumentException(
+                "Invalid step: missing id or description"
+              )
 
             buf += PlanStep(
               id = id,
@@ -368,7 +528,10 @@ Respond with JSON:
         throw new IllegalArgumentException("Invalid plan JSON: no steps parsed")
 
       val strategyText =
-        getText(planNode, "strategy").orElse(getText(root, "strategy")).getOrElse("parallel").toLowerCase()
+        getText(planNode, "strategy")
+          .orElse(getText(root, "strategy"))
+          .getOrElse("parallel")
+          .toLowerCase()
 
       val strategy = strategyText match
         case "sequential" => ExecutionStrategy.Sequential
@@ -390,33 +553,47 @@ Respond with JSON:
       .trim
     val start = noFences.indexOf('{')
     val end = noFences.lastIndexOf('}')
-    if start >= 0 && end >= start then noFences.substring(start, end + 1) else noFences
+    if start >= 0 && end >= start then noFences.substring(start, end + 1)
+    else noFences
 
   // ========== Execution Strategies ==========
 
   private def executeSequential(
-    plan: ExecutionPlan,
-    context: ConversationContext,
-    replyTo: ActorRef[Any],
-    capability: AgentCapability,
-    provider: LLMProvider,
-    registry: AgentRegistry,
-    conversations: Map[String, ConversationContext],
-    uiBus: Option[ActorRef[UiEventBus.Command]],
-    activePlans: Map[String, ExecutionPlan],
-    planningEnabled: Boolean
+      plan: ExecutionPlan,
+      context: ConversationContext,
+      replyTo: ActorRef[Any],
+      capability: AgentCapability,
+      provider: LLMProvider,
+      registry: AgentRegistry,
+      conversations: Map[String, ConversationContext],
+      uiBus: Option[ActorRef[UiEventBus.Command]],
+      activePlans: Map[String, ExecutionPlan],
+      planningEnabled: Boolean
   )(using ctx: ActorContext[Command], ec: ExecutionContext): Behavior[Command] =
     // Execute steps strictly in order, honoring dependencies as provided in the plan order.
-    val run = plan.steps.foldLeft(Future.successful((Map.empty[String, String], context))) {
-      case (accF, step) =>
-        accF.flatMap { case (accResults, ctxAcc) =>
-          executeStep(step, ctxAcc, accResults, registry, provider, uiBus, capability)
-            .map { case (result, newCtx) =>
-              // Emit step completion to UI bus
-              uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.StepCompleted(ctxAcc.id, step.id)))
-              (accResults + (step.id -> result), newCtx)
-            }
-        }
+    val run = plan.steps.foldLeft(
+      Future.successful((Map.empty[String, String], context))
+    ) { case (accF, step) =>
+      accF.flatMap { case (accResults, ctxAcc) =>
+        executeStep(
+          step,
+          ctxAcc,
+          accResults,
+          registry,
+          provider,
+          uiBus,
+          capability
+        )
+          .map { case (result, newCtx) =>
+            // Emit step completion to UI bus
+            uiBus.foreach(
+              _ ! UiEventBus.Publish(
+                UiEventBus.StepCompleted(ctxAcc.id, step.id)
+              )
+            )
+            (accResults + (step.id -> result), newCtx)
+          }
+      }
     }
 
     ctx.pipeToSelf(run) {
@@ -428,59 +605,113 @@ Respond with JSON:
           conversationId = finalCtx.id,
           agentId = Some(ctx.self.path.name)
         )
-        uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.ChatMessage(finalCtx.id, responseMsg.role.toString, responseMsg.id, responseMsg.content.text, responseMsg.agentId)))
-        uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.AggregateCompleted(finalCtx.id, finalResult.length)))
-        replyTo ! ProcessedMessage(responseMsg, finalCtx.addMessage(responseMsg))
+        uiBus.foreach(
+          _ ! UiEventBus.Publish(
+            UiEventBus.ChatMessage(
+              finalCtx.id,
+              responseMsg.role.toString,
+              responseMsg.id,
+              responseMsg.content.text,
+              responseMsg.agentId
+            )
+          )
+        )
+        uiBus.foreach(
+          _ ! UiEventBus.Publish(
+            UiEventBus.AggregateCompleted(finalCtx.id, finalResult.length)
+          )
+        )
+        replyTo ! ProcessedMessage(
+          responseMsg,
+          finalCtx.addMessage(responseMsg)
+        )
         NoOp
 
       case Failure(ex) =>
         ctx.log.error(s"[${capability.name}] Sequential execution failed", ex)
-              uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.ErrorEvent(context.id, s"Sequential failure: ${ex.getMessage}")))
+        uiBus.foreach(
+          _ ! UiEventBus.Publish(
+            UiEventBus.ErrorEvent(
+              context.id,
+              s"Sequential failure: ${ex.getMessage}"
+            )
+          )
+        )
         replyTo ! ProcessingFailed(ex.getMessage, context.id)
         NoOp
     }
 
-    idle(capability, provider, registry, conversations + (context.id -> context), uiBus, planningEnabled, activePlans)
+    idle(
+      capability,
+      provider,
+      registry,
+      conversations + (context.id -> context),
+      uiBus,
+      planningEnabled,
+      activePlans
+    )
 
   private def executeParallel(
-    plan: ExecutionPlan,
-    context: ConversationContext,
-    replyTo: ActorRef[Any],
-    capability: AgentCapability,
-    provider: LLMProvider,
-    registry: AgentRegistry,
-    conversations: Map[String, ConversationContext],
-    uiBus: Option[ActorRef[UiEventBus.Command]],
-    activePlans: Map[String, ExecutionPlan],
-    planningEnabled: Boolean
+      plan: ExecutionPlan,
+      context: ConversationContext,
+      replyTo: ActorRef[Any],
+      capability: AgentCapability,
+      provider: LLMProvider,
+      registry: AgentRegistry,
+      conversations: Map[String, ConversationContext],
+      uiBus: Option[ActorRef[UiEventBus.Command]],
+      activePlans: Map[String, ExecutionPlan],
+      planningEnabled: Boolean
   )(using ctx: ActorContext[Command], ec: ExecutionContext): Behavior[Command] =
-    
+
     // Execute independent steps in parallel (no dependencies)
     val independentSteps = plan.steps.filter(_.dependencies.isEmpty)
-    
-    ctx.log.info(s"[${capability.name}] Executing ${independentSteps.size} steps in parallel")
-    
+
+    ctx.log.info(
+      s"[${capability.name}] Executing ${independentSteps.size} steps in parallel"
+    )
+
     val tasks: Seq[Future[Either[(String, Throwable), (String, String)]]] =
       independentSteps
         .take(plan.maxParallelism)
         .map { step =>
-          executeStep(step, context, Map.empty, registry, provider, uiBus, capability)
+          executeStep(
+            step,
+            context,
+            Map.empty,
+            registry,
+            provider,
+            uiBus,
+            capability
+          )
             .map { case (res, _) =>
               // Emit step completion to UI bus
-              uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.StepCompleted(context.id, step.id)))
+              uiBus.foreach(
+                _ ! UiEventBus
+                  .Publish(UiEventBus.StepCompleted(context.id, step.id))
+              )
               Right(step.id -> res)
             }
             .recover { case ex =>
-              uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.ErrorEvent(context.id, s"Step ${step.id} failure: ${ex.getMessage}")))
+              uiBus.foreach(
+                _ ! UiEventBus.Publish(
+                  UiEventBus.ErrorEvent(
+                    context.id,
+                    s"Step ${step.id} failure: ${ex.getMessage}"
+                  )
+                )
+              )
               Left(step.id -> ex)
             }
         }
-    
+
     val resultsFuture = Future.sequence(tasks)
-    
+
     ctx.pipeToSelf(resultsFuture) {
       case Success(results) =>
-        val successes = results.collect { case Right((id, res)) => id -> res }.toMap
+        val successes = results.collect { case Right((id, res)) =>
+          id -> res
+        }.toMap
         val finalResult = aggregateResults(plan, successes)
         val responseMsg = Message(
           role = MessageRole.Assistant,
@@ -488,142 +719,236 @@ Respond with JSON:
           conversationId = context.id,
           agentId = Some(ctx.self.path.name)
         )
-        uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.ChatMessage(context.id, responseMsg.role.toString, responseMsg.id, responseMsg.content.text, responseMsg.agentId)))
-        
-        ctx.log.info(s"[${capability.name}] Parallel execution completed with ${successes.size}/${independentSteps.size} successes")
-        uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.AggregateCompleted(context.id, finalResult.length)))
-        
+        uiBus.foreach(
+          _ ! UiEventBus.Publish(
+            UiEventBus.ChatMessage(
+              context.id,
+              responseMsg.role.toString,
+              responseMsg.id,
+              responseMsg.content.text,
+              responseMsg.agentId
+            )
+          )
+        )
+
+        ctx.log.info(
+          s"[${capability.name}] Parallel execution completed with ${successes.size}/${independentSteps.size} successes"
+        )
+        uiBus.foreach(
+          _ ! UiEventBus.Publish(
+            UiEventBus.AggregateCompleted(context.id, finalResult.length)
+          )
+        )
+
         replyTo ! ProcessedMessage(responseMsg, context.addMessage(responseMsg))
         NoOp
-        
+
       case Failure(ex) =>
         ctx.log.error(s"[${capability.name}] Parallel execution failed", ex)
-        uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.ErrorEvent(context.id, ex.getMessage)))
+        uiBus.foreach(
+          _ ! UiEventBus.Publish(
+            UiEventBus.ErrorEvent(context.id, ex.getMessage)
+          )
+        )
         replyTo ! ProcessingFailed(ex.getMessage, context.id)
         NoOp
     }
-    
-    idle(capability, provider, registry, conversations + (context.id -> context), uiBus, planningEnabled, activePlans)
+
+    idle(
+      capability,
+      provider,
+      registry,
+      conversations + (context.id -> context),
+      uiBus,
+      planningEnabled,
+      activePlans
+    )
 
   private def executeAdaptive(
-    plan: ExecutionPlan,
-    context: ConversationContext,
-    replyTo: ActorRef[Any],
-    capability: AgentCapability,
-    provider: LLMProvider,
-    registry: AgentRegistry,
-    conversations: Map[String, ConversationContext],
-    uiBus: Option[ActorRef[UiEventBus.Command]],
-    activePlans: Map[String, ExecutionPlan],
-    planningEnabled: Boolean
+      plan: ExecutionPlan,
+      context: ConversationContext,
+      replyTo: ActorRef[Any],
+      capability: AgentCapability,
+      provider: LLMProvider,
+      registry: AgentRegistry,
+      conversations: Map[String, ConversationContext],
+      uiBus: Option[ActorRef[UiEventBus.Command]],
+      activePlans: Map[String, ExecutionPlan],
+      planningEnabled: Boolean
   )(using ctx: ActorContext[Command], ec: ExecutionContext): Behavior[Command] =
     // Adaptive: start with parallel, fall back to sequential on contention
-    ctx.log.info(s"[${capability.name}] Using adaptive strategy (defaulting to parallel)")
-    executeParallel(plan, context, replyTo, capability, provider, registry, conversations, uiBus, activePlans, planningEnabled)
+    ctx.log.info(
+      s"[${capability.name}] Using adaptive strategy (defaulting to parallel)"
+    )
+    executeParallel(
+      plan,
+      context,
+      replyTo,
+      capability,
+      provider,
+      registry,
+      conversations,
+      uiBus,
+      activePlans,
+      planningEnabled
+    )
 
   // ========== Step Execution ==========
 
   private def executeStep(
-    step: PlanStep,
-    context: ConversationContext,
-    priorResults: Map[String, String],
-    registry: AgentRegistry,
-    provider: LLMProvider,
-    uiBus: Option[ActorRef[UiEventBus.Command]],
-    capability: AgentCapability
-  )(using ctx: ActorContext[Command], ec: ExecutionContext): Future[(String, ConversationContext)] =
-    
+      step: PlanStep,
+      context: ConversationContext,
+      priorResults: Map[String, String],
+      registry: AgentRegistry,
+      provider: LLMProvider,
+      uiBus: Option[ActorRef[UiEventBus.Command]],
+      capability: AgentCapability
+  )(using
+      ctx: ActorContext[Command],
+      ec: ExecutionContext
+  ): Future[(String, ConversationContext)] =
+
     log.info(s"[executeStep] Step ${step.id}: ${step.description}")
-    
+
     for {
       // 1. Find suitable agent
       agentOpt <- findBestAgent(step, registry)
-      
+
       // 2. Delegate or execute locally
       result <- agentOpt match {
         case Some(agent) =>
-          log.info(s"[executeStep] Delegating step ${step.id} to agent ${agent.path.name}")
+          log.info(
+            s"[executeStep] Delegating step ${step.id} to agent ${agent.path.name}"
+          )
           delegateToAgent(agent, step, context, priorResults, uiBus, capability)
-          
+
         case None =>
-          log.info(s"[executeStep] No suitable agent, executing step ${step.id} locally")
-          executeSelfContained(step, context, priorResults, provider, uiBus, capability)
+          log.info(
+            s"[executeStep] No suitable agent, executing step ${step.id} locally"
+          )
+          executeSelfContained(
+            step,
+            context,
+            priorResults,
+            provider,
+            uiBus,
+            capability
+          )
       }
-      
+
     } yield (result, context)
 
   private def findBestAgent(
-    step: PlanStep,
-    registry: AgentRegistry
+      step: PlanStep,
+      registry: AgentRegistry
   )(using ec: ExecutionContext): Future[Option[ActorRef[BaseAgent.Command]]] =
-    
-    // Priority: target capability > all skills > any skill
-    log.info(s"[CAPABILITY] , my ${step.targetCapability} ")
-    step.targetCapability match {
-      case Some(cap) =>
-        registry.findAgent(cap)
-        
-      case None if step.requiredSkills.nonEmpty =>
-        registry.findAgentsByAllSkills(step.requiredSkills).flatMap { agents =>
-          if agents.nonEmpty then Future.successful(agents.headOption)
-          else registry.findAgentsByAnySkill(step.requiredSkills).map(_.headOption)
+
+    // Priority: agent -> target capability > all skills > any skill
+    log.info(s"[STEP] , my ${step}")
+    log.info(s"[CAPABILITY] , my ${step.targetCapability}  or agent ${step.assignedAgent}")
+    step.assignedAgent match {
+      case Some(agent) =>
+        registry.findAgent(agent)
+
+      case None =>
+        step.targetCapability match {
+          case Some(cap) =>
+            registry.findAgent(cap)
+
+          case None if step.requiredSkills.nonEmpty =>
+            registry.findAgentsByAllSkills(step.requiredSkills).flatMap {
+              agents =>
+                if agents.nonEmpty then Future.successful(agents.headOption)
+                else
+                  registry
+                    .findAgentsByAnySkill(step.requiredSkills)
+                    .map(_.headOption)
+            }
+
+          case _ =>
+            Future.successful(None)
         }
-        
-      case _ =>
-        Future.successful(None)
     }
 
   private def delegateToAgent(
-    agent: ActorRef[BaseAgent.Command],
-    step: PlanStep,
-    context: ConversationContext,
-    priorResults: Map[String, String],
-    uiBus: Option[ActorRef[UiEventBus.Command]],
-    capability: AgentCapability
+      agent: ActorRef[BaseAgent.Command],
+      step: PlanStep,
+      context: ConversationContext,
+      priorResults: Map[String, String],
+      uiBus: Option[ActorRef[UiEventBus.Command]],
+      capability: AgentCapability
   )(using ctx: ActorContext[Command], ec: ExecutionContext): Future[String] =
-    
+
     import org.apache.pekko.actor.typed.scaladsl.AskPattern.*
     import org.apache.pekko.actor.typed.ActorSystem
     import org.apache.pekko.actor.typed.scaladsl.AskPattern.schedulerFromActorSystem
     import org.apache.pekko.util.Timeout
     given Timeout = 360.seconds
     given ActorSystem[?] = ctx.system
-    
-    val enrichedPrompt = buildStepPrompt(step, priorResults)
+
+    val enrichedPrompt = buildStepPrompt(step, priorResults, context)
     val message = Message(
       role = MessageRole.User,
-      content = MessageContent(enrichedPrompt, metadata = Map("stepId" -> step.id)),
+      content =
+        MessageContent(enrichedPrompt, metadata = Map("stepId" -> step.id)),
       conversationId = context.id
     )
 
     // Publish chat and dispatch info
     uiBus.foreach { bus =>
-      bus ! UiEventBus.Publish(UiEventBus.ChatMessage(context.id, message.role.toString, message.id, message.content.text, Some(capability.name)))
-      bus ! UiEventBus.Publish(UiEventBus.StepDispatched(context.id, step.id, step.targetCapability.getOrElse("unknown"), message.id))
-    }
-    
-    agent.ask[Command](replyTo => ProcessMessage(message, context, replyTo.unsafeUpcast[Any])).flatMap {
-      case ProcessedMessage(response, _) =>
-        uiBus.foreach { bus =>
-          bus ! UiEventBus.Publish(UiEventBus.ChatMessage(context.id, response.role.toString, response.id, response.content.text, response.agentId.orElse(Some(agent.path.name))))
-        }
-        Future.successful(response.content.text)
-      case ProcessingFailed(error, _) =>
-        Future.failed(new RuntimeException(s"Agent failed: $error"))
-      case other =>
-        Future.failed(new RuntimeException(s"Unexpected response: $other"))
+      bus ! UiEventBus.Publish(
+        UiEventBus.ChatMessage(
+          context.id,
+          message.role.toString,
+          message.id,
+          message.content.text,
+          Some(capability.name)
+        )
+      )
+      bus ! UiEventBus.Publish(
+        UiEventBus.StepDispatched(
+          context.id,
+          step.id,
+          step.targetCapability.getOrElse("unknown"),
+          message.id
+        )
+      )
     }
 
+    agent
+      .ask[Command](replyTo =>
+        ProcessMessage(message, context, replyTo.unsafeUpcast[Any])
+      )
+      .flatMap {
+        case ProcessedMessage(response, _) =>
+          uiBus.foreach { bus =>
+            bus ! UiEventBus.Publish(
+              UiEventBus.ChatMessage(
+                context.id,
+                response.role.toString,
+                response.id,
+                response.content.text,
+                response.agentId.orElse(Some(agent.path.name))
+              )
+            )
+          }
+          Future.successful(response.content.text)
+        case ProcessingFailed(error, _) =>
+          Future.failed(new RuntimeException(s"Agent failed: $error"))
+        case other =>
+          Future.failed(new RuntimeException(s"Unexpected response: $other"))
+      }
+
   private def executeSelfContained(
-    step: PlanStep,
-    context: ConversationContext,
-    priorResults: Map[String, String],
-    provider: LLMProvider,
-    uiBus: Option[ActorRef[UiEventBus.Command]],
-    capability: AgentCapability
+      step: PlanStep,
+      context: ConversationContext,
+      priorResults: Map[String, String],
+      provider: LLMProvider,
+      uiBus: Option[ActorRef[UiEventBus.Command]],
+      capability: AgentCapability
   )(using ec: ExecutionContext): Future[String] =
-    
-    val prompt = buildStepPrompt(step, priorResults)
+
+    val prompt = buildStepPrompt(step, priorResults, context)
     val userMsg = Message(
       role = MessageRole.User,
       content = MessageContent(prompt, metadata = Map("stepId" -> step.id)),
@@ -631,13 +956,29 @@ Respond with JSON:
     )
     // Publish the prompt and dispatch
     uiBus.foreach { bus =>
-      bus ! UiEventBus.Publish(UiEventBus.ChatMessage(context.id, userMsg.role.toString, userMsg.id, userMsg.content.text, Some(capability.name)))
-      bus ! UiEventBus.Publish(UiEventBus.StepDispatched(context.id, step.id, capability.name, userMsg.id))
+      bus ! UiEventBus.Publish(
+        UiEventBus.ChatMessage(
+          context.id,
+          userMsg.role.toString,
+          userMsg.id,
+          userMsg.content.text,
+          Some(capability.name)
+        )
+      )
+      bus ! UiEventBus.Publish(
+        UiEventBus.StepDispatched(
+          context.id,
+          step.id,
+          capability.name,
+          userMsg.id
+        )
+      )
     }
     provider
       .completion(
         Seq(userMsg),
-        systemPrompt = "You are a helpful assistant executing a specific task step."
+        systemPrompt =
+          "You are a helpful assistant executing a specific task step."
       )
       .map { txt =>
         // Publish assistant response
@@ -648,24 +989,43 @@ Respond with JSON:
           agentId = Some(capability.name)
         )
         uiBus.foreach { bus =>
-          bus ! UiEventBus.Publish(UiEventBus.ChatMessage(context.id, respMsg.role.toString, respMsg.id, respMsg.content.text, respMsg.agentId))
+          bus ! UiEventBus.Publish(
+            UiEventBus.ChatMessage(
+              context.id,
+              respMsg.role.toString,
+              respMsg.id,
+              respMsg.content.text,
+              respMsg.agentId
+            )
+          )
         }
         txt
       }
 
-  private def buildStepPrompt(step: PlanStep, priorResults: Map[String, String]): String =
+  private def buildStepPrompt(
+      step: PlanStep,
+      priorResults: Map[String, String],
+      context: ConversationContext
+  ): String =
     val dependencies = step.dependencies.toSeq.sorted
-    val ctxText = if dependencies.isEmpty then ""
-    else {
-      val depResults = dependencies.flatMap { depId =>
-        priorResults.get(depId).map(res => s"[$depId]: $res")
-      }.mkString("\n")
-      s"\n\nContext from prior steps:\n$depResults\n"
-    }
-    
-    s"${step.description} [stepId: ${step.id}]$ctxText"
+    val ctxText =
+      if dependencies.isEmpty then ""
+      else {
+        val depResults = dependencies
+          .flatMap { depId =>
+            priorResults.get(depId).map(res => s"[$depId]: $res")
+          }
+          .mkString("\n")
+        s"\n\nContext from prior steps:\n$depResults\n"
+      }
 
-  private def aggregateResults(plan: ExecutionPlan, results: Map[String, String]): String =
+    log.info(s"[CONTEXT fordelegation Prompt]  ${context.metadata}")
+    s"${step.description} [stepId: ${step.id}]$ctxText withh context: ${context.metadata}" //FIXME better format vector context
+    
+  private def aggregateResults(
+      plan: ExecutionPlan,
+      results: Map[String, String]
+  ): String =
     def humanStepLabel(id: String): String =
       val m = "(?i)step-?(\\d+)".r.findFirstMatchIn(id)
       m.map(m => s"Step ${m.group(1)}").getOrElse(id)
@@ -676,7 +1036,7 @@ Respond with JSON:
         s"### [${humanStepLabel(step.id)}] ${step.description}\n$result"
       }
     }
-    
+
     s"""# Results for: ${plan.originalQuery}
        |
        |${sections.mkString("\n\n")}
@@ -688,36 +1048,58 @@ Respond with JSON:
   // ========== Direct Execution (Fallback) ==========
 
   private def executeDirectly(
-    message: Message,
-    context: ConversationContext,
-    replyTo: ActorRef[Any],
-    capability: AgentCapability,
-    provider: LLMProvider,
-    registry: AgentRegistry,
-    conversations: Map[String, ConversationContext],
-    uiBus: Option[ActorRef[UiEventBus.Command]],
-    planningEnabled: Boolean,
-    activePlans: Map[String, ExecutionPlan]
+      message: Message,
+      context: ConversationContext,
+      replyTo: ActorRef[Any],
+      capability: AgentCapability,
+      provider: LLMProvider,
+      registry: AgentRegistry,
+      conversations: Map[String, ConversationContext],
+      uiBus: Option[ActorRef[UiEventBus.Command]],
+      planningEnabled: Boolean,
+      activePlans: Map[String, ExecutionPlan]
   )(using ctx: ActorContext[Command], ec: ExecutionContext): Behavior[Command] =
-    
+
     val stepId = message.content.metadata.getOrElse("stepId", "direct")
     ctx.log.info(s"[${capability.name}] Direct execution stepId=$stepId")
-    uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.AgentStart(context.id, capability.name, stepId, message.id, false)))
+    uiBus.foreach(
+      _ ! UiEventBus.Publish(
+        UiEventBus.AgentStart(
+          context.id,
+          capability.name,
+          stepId,
+          message.id,
+          false
+        )
+      )
+    )
     uiBus.foreach { bus =>
-      val sysText = capability.config.getOrElse("systemPrompt", "You are a helpful assistant")
+      val sysText = capability.config.getOrElse(
+        "systemPrompt",
+        "You are a helpful assistant"
+      )
       val sysMsg = Message(
         role = MessageRole.System,
         content = MessageContent(sysText),
         conversationId = context.id,
         agentId = Some(capability.name)
       )
-      bus ! UiEventBus.Publish(UiEventBus.ChatMessage(context.id, sysMsg.role.toString, sysMsg.id, sysMsg.content.text, sysMsg.agentId))
+      bus ! UiEventBus.Publish(
+        UiEventBus.ChatMessage(
+          context.id,
+          sysMsg.role.toString,
+          sysMsg.id,
+          sysMsg.content.text,
+          sysMsg.agentId
+        )
+      )
     }
-    
+
     ctx.pipeToSelf(
       provider.completion(
         context.messages.toSeq :+ message,
-        capability.config.getOrElse("systemPrompt", "You are a helpful assistant")
+        capability.config
+          .getOrElse("systemPrompt", "You are a helpful assistant")
       )
     ) {
       case Success(response) =>
@@ -727,39 +1109,94 @@ Respond with JSON:
           conversationId = context.id,
           agentId = Some(ctx.self.path.name)
         )
-        uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.ChatMessage(context.id, responseMsg.role.toString, responseMsg.id, responseMsg.content.text, responseMsg.agentId)))
-        uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.AgentComplete(context.id, capability.name, stepId, responseMsg.id, response.length)))
-        replyTo ! ProcessedMessage(responseMsg, context.addMessage(message).addMessage(responseMsg))
+        uiBus.foreach(
+          _ ! UiEventBus.Publish(
+            UiEventBus.ChatMessage(
+              context.id,
+              responseMsg.role.toString,
+              responseMsg.id,
+              responseMsg.content.text,
+              responseMsg.agentId
+            )
+          )
+        )
+        uiBus.foreach(
+          _ ! UiEventBus.Publish(
+            UiEventBus.AgentComplete(
+              context.id,
+              capability.name,
+              stepId,
+              responseMsg.id,
+              response.length
+            )
+          )
+        )
+        replyTo ! ProcessedMessage(
+          responseMsg,
+          context.addMessage(message).addMessage(responseMsg)
+        )
         NoOp
-        
+
       case Failure(ex) =>
         ctx.log.error(s"[${capability.name}] Direct execution failed", ex)
-        uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.ErrorEvent(context.id, ex.getMessage)))
+        uiBus.foreach(
+          _ ! UiEventBus.Publish(
+            UiEventBus.ErrorEvent(context.id, ex.getMessage)
+          )
+        )
         replyTo ! ProcessingFailed(ex.getMessage, message.id)
         NoOp
     }
-    
-    idle(capability, provider, registry, conversations + (context.id -> context), uiBus, planningEnabled, activePlans)
+
+    idle(
+      capability,
+      provider,
+      registry,
+      conversations + (context.id -> context),
+      uiBus,
+      planningEnabled,
+      activePlans
+    )
 
   private def streamDirectly(
-    message: Message,
-    context: ConversationContext,
-    replyTo: ActorRef[Any],
-    capability: AgentCapability,
-    provider: LLMProvider,
-    registry: AgentRegistry,
-    conversations: Map[String, ConversationContext],
-    uiBus: Option[ActorRef[UiEventBus.Command]],
-    planningEnabled: Boolean,
-    activePlans: Map[String, ExecutionPlan]
+      message: Message,
+      context: ConversationContext,
+      replyTo: ActorRef[Any],
+      capability: AgentCapability,
+      provider: LLMProvider,
+      registry: AgentRegistry,
+      conversations: Map[String, ConversationContext],
+      uiBus: Option[ActorRef[UiEventBus.Command]],
+      planningEnabled: Boolean,
+      activePlans: Map[String, ExecutionPlan]
   )(using ctx: ActorContext[Command], ec: ExecutionContext): Behavior[Command] =
-    
+
     given Materializer = Materializer(ctx.system)
-    
+
     val stepId = message.content.metadata.getOrElse("stepId", "stream")
     ctx.log.info(s"[${capability.name}] Streaming stepId=$stepId")
-    uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.AgentStart(context.id, capability.name, stepId, message.id, false)))
-    uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.ChatMessage(context.id, message.role.toString, message.id, message.content.text, message.agentId)))
+    uiBus.foreach(
+      _ ! UiEventBus.Publish(
+        UiEventBus.AgentStart(
+          context.id,
+          capability.name,
+          stepId,
+          message.id,
+          false
+        )
+      )
+    )
+    uiBus.foreach(
+      _ ! UiEventBus.Publish(
+        UiEventBus.ChatMessage(
+          context.id,
+          message.role.toString,
+          message.id,
+          message.content.text,
+          message.agentId
+        )
+      )
+    )
     uiBus.foreach { bus =>
       val sysText = capability.config.getOrElse("systemPrompt", "")
       if sysText.nonEmpty then
@@ -769,18 +1206,26 @@ Respond with JSON:
           conversationId = context.id,
           agentId = Some(capability.name)
         )
-        bus ! UiEventBus.Publish(UiEventBus.ChatMessage(context.id, sysMsg.role.toString, sysMsg.id, sysMsg.content.text, sysMsg.agentId))
+        bus ! UiEventBus.Publish(
+          UiEventBus.ChatMessage(
+            context.id,
+            sysMsg.role.toString,
+            sysMsg.id,
+            sysMsg.content.text,
+            sysMsg.agentId
+          )
+        )
     }
-    
+
     val stream = provider.streamCompletion(
       context.messages.toSeq :+ message,
       capability.config.getOrElse("systemPrompt", "")
     )
-    
+
     stream.runForeach { token =>
       replyTo ! StreamChunk(token.content, token.messageId)
     }
-    
+
     ctx.pipeToSelf(stream.runWith(Sink.fold("")(_ + _.content))) {
       case Success(fullResponse) =>
         val responseMsg = Message(
@@ -789,31 +1234,63 @@ Respond with JSON:
           conversationId = context.id,
           agentId = Some(ctx.self.path.name)
         )
-        uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.ChatMessage(context.id, responseMsg.role.toString, responseMsg.id, responseMsg.content.text, responseMsg.agentId)))
-        uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.AgentComplete(context.id, capability.name, stepId, responseMsg.id, fullResponse.length)))
+        uiBus.foreach(
+          _ ! UiEventBus.Publish(
+            UiEventBus.ChatMessage(
+              context.id,
+              responseMsg.role.toString,
+              responseMsg.id,
+              responseMsg.content.text,
+              responseMsg.agentId
+            )
+          )
+        )
+        uiBus.foreach(
+          _ ! UiEventBus.Publish(
+            UiEventBus.AgentComplete(
+              context.id,
+              capability.name,
+              stepId,
+              responseMsg.id,
+              fullResponse.length
+            )
+          )
+        )
         replyTo ! StreamComplete(responseMsg)
         NoOp
-        
+
       case Failure(ex) =>
         ctx.log.error(s"[${capability.name}] Streaming failed", ex)
-        uiBus.foreach(_ ! UiEventBus.Publish(UiEventBus.ErrorEvent(context.id, ex.getMessage)))
+        uiBus.foreach(
+          _ ! UiEventBus.Publish(
+            UiEventBus.ErrorEvent(context.id, ex.getMessage)
+          )
+        )
         replyTo ! StreamError(ex.getMessage)
         NoOp
     }
-    
-    idle(capability, provider, registry, conversations + (context.id -> context), uiBus, planningEnabled, activePlans)
+
+    idle(
+      capability,
+      provider,
+      registry,
+      conversations + (context.id -> context),
+      uiBus,
+      planningEnabled,
+      activePlans
+    )
 
   // ========== Processing State ==========
 
   private def processing(
-    capability: AgentCapability,
-    provider: LLMProvider,
-    registry: AgentRegistry,
-    conversations: Map[String, ConversationContext],
-    pendingReply: ActorRef[?],
-    uiBus: Option[ActorRef[UiEventBus.Command]],
-    planningEnabled: Boolean,
-    activePlans: Map[String, ExecutionPlan]
+      capability: AgentCapability,
+      provider: LLMProvider,
+      registry: AgentRegistry,
+      conversations: Map[String, ConversationContext],
+      pendingReply: ActorRef[?],
+      uiBus: Option[ActorRef[UiEventBus.Command]],
+      planningEnabled: Boolean,
+      activePlans: Map[String, ExecutionPlan]
   )(using ctx: ActorContext[Command], ec: ExecutionContext): Behavior[Command] =
     Behaviors.receiveMessage[Command] {
       case Stop =>
@@ -821,7 +1298,15 @@ Respond with JSON:
         Behaviors.stopped
 
       case NoOp =>
-        idle(capability, provider, registry, conversations, uiBus, planningEnabled, activePlans)
+        idle(
+          capability,
+          provider,
+          registry,
+          conversations,
+          uiBus,
+          planningEnabled,
+          activePlans
+        )
 
       case _ =>
         ctx.log.warn(s"[${capability.name}] Ignoring message while processing")
