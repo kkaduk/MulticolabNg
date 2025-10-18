@@ -130,8 +130,16 @@ Real‑time observability is provided via a **UI event bus** and **WebSocket rou
 
 The gRPC server binds to port 6060 in `MainApp`, enabling clients (e.g., a JavaScript UI) to interact with the system over HTTP/2.
 
+## Step 9 — Run UI for conversation observation
 
-## 9 Configuration and Bootstrap
+```
+cd ui && npm run dev
+```
+
+![UI Screen](picture/AgentGraph.png)
+
+
+## 10 Configuration and Bootstrap
 
 
 Configuration resides in `application.conf` and `dev.conf`.  Key parameters include Pekko cluster settings, HTTP server options and LLM provider credentials (OpenAI API key, model names, etc.).  Agents are defined under `agents { … }` with fields `provider`, `agentType` (`llm` or `llm-main`), `capability`, `skills`, `systemPrompt` and custom names.  For example, a creator agent might be configured as:
