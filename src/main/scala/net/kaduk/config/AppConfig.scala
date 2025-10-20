@@ -16,7 +16,8 @@ case class AgentConfig(
   systemPrompt: String,
   name: Option[String] = None,
   skills: Set[String] = Set.empty,
-  capability: Option[String] = None
+  capability: Option[String] = None,
+  config: Map[String, String] = Map.empty
 )
 
 case class AppConfig(
@@ -54,8 +55,16 @@ object AppConfig:
           systemPrompt = if agentConfig.hasPath("system-prompt") then agentConfig.getString("system-prompt") else "",
           name = if agentConfig.hasPath("name") then Some(agentConfig.getString("name")) else None,
           skills = if agentConfig.hasPath("skills") then agentConfig.getStringList("skills").asScala.toSet else Set.empty,
-          capability = if agentConfig.hasPath("capability") then Some(agentConfig.getString("capability")) else None
+          capability = if agentConfig.hasPath("capability") then Some(agentConfig.getString("capability")) else None,
+          config = if agentConfig.hasPath("config") then toStringMap(agentConfig.getConfig("config")) else Map.empty
         )
       .toMap
     
     AppConfig(llmProviders, agents)
+
+  private def toStringMap(conf: Config): Map[String, String] =
+    conf.entrySet().asScala.map { entry =>
+      val path = entry.getKey
+      val value = conf.getAnyRef(path)
+      path -> value.toString
+    }.toMap

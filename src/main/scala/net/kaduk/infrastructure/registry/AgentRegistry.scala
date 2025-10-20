@@ -143,6 +143,16 @@ class AgentRegistry(using system: ActorSystem[?], ec: ExecutionContext):
       }.flatten.toSet
       Future.successful(refs)
 
+  /** Snapshot of registered capabilities mapped to their declared skills (all normalized to lower-case). */
+  def listRegisteredCapabilities(): Map[String, Set[String]] =
+    agentCaps.values
+      .groupBy(_.name.trim.toLowerCase)
+      .map { case (name, caps) =>
+        val skills =
+          caps.flatMap(_.skills.map(_.trim.toLowerCase)).filter(_.nonEmpty).toSet
+        name -> skills
+      }
+
 object AgentRegistry:
   def apply()(using system: ActorSystem[?], ec: ExecutionContext): AgentRegistry =
     new AgentRegistry(using system, ec)

@@ -55,7 +55,10 @@ lazy val root = project
       "org.scalatestplus" %% "mockito-4-11" % "3.2.17.0" % Test,
 
       "org.openjdk.jmh" % "jmh-core" % "1.37",
-      "org.openjdk.jmh" % "jmh-generator-annprocess" % "1.37"
+      "org.openjdk.jmh" % "jmh-generator-annprocess" % "1.37",
+
+      // HTML parsing for crawler agent
+      "org.jsoup" % "jsoup" % "1.17.2"
 
 
     ),

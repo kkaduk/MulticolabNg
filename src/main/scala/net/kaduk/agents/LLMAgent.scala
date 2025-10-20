@@ -400,16 +400,7 @@ object LLMAgent:
   private def discoverAgentCapabilities(registry: AgentRegistry)(using
       ec: ExecutionContext
   ): Future[Map[String, Set[String]]] =
-    // Query a fixed set of known capabilities and include ONLY those that are actually registered
-    // FIXME - read from configuration (KK)
-    val knownCapabilities = Seq("creator", "critic", "finalizer", "risk")
-    Future
-      .traverse(knownCapabilities) { cap =>
-        registry.findAgent(cap).map { optRef =>
-          if optRef.isDefined then cap -> Set(cap) else cap -> Set.empty[String]
-        }
-      }
-      .map(_.toMap.filter(_._2.nonEmpty))
+    Future.successful(registry.listRegisteredCapabilities())
 
   private def buildPlanningPrompt(
       message: Message,

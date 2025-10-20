@@ -5,7 +5,7 @@ import org.apache.pekko.actor.typed.ActorRef
 import org.apache.pekko.actor.typed.scaladsl.Behaviors
 import org.apache.pekko.http.scaladsl.Http
 import org.apache.pekko.http.scaladsl.model.{HttpRequest, HttpResponse}
-import net.kaduk.agents.{LLMAgent}
+import net.kaduk.agents.{LLMAgent, WebCrawlerAgent}
 import net.kaduk.agents.BaseAgent
 import net.kaduk.infrastructure.llm.{OpenAIProvider, ClaudeProvider, OllamaProvider, VertexProvider}
 import net.kaduk.infrastructure.registry.AgentRegistry
@@ -40,21 +40,56 @@ object MainApp:
           
           val actorName = agentConfig.name.getOrElse(name)
           val capabilityName = agentConfig.capability.getOrElse(name)
-          val skills = if agentConfig.skills.nonEmpty then agentConfig.skills else Set("text-generation")
+          val skills =
+            if agentConfig.skills.nonEmpty then agentConfig.skills
+            else
+              agentConfig.agentType match
+                case "web-crawler" => Set("search", "summarization")
+                case _             => Set("text-generation")
+
+          val baseConfig =
+            if agentConfig.systemPrompt.nonEmpty then
+              Map("systemPrompt" -> agentConfig.systemPrompt)
+            else Map.empty[String, String]
+
+          val agentTypeEnum = agentConfig.agentType match
+            case "llm-main"    => AgentType.Orchestrator
+            case "web-crawler" => AgentType.Specialist
+            case _             => AgentType.LLM
 
           val capability = AgentCapability(
             name = capabilityName,
-            agentType = AgentType.LLM,
+            agentType = agentTypeEnum,
             skills = skills,
             provider = agentConfig.provider,
-            config = Map("systemPrompt" -> agentConfig.systemPrompt)
+            config = baseConfig ++ agentConfig.config
           )
-          if agentConfig.agentType == "llm" then
-            ctx.log.info(s"Spawning LLM agent: $name")
-            val agentRef = ctx.spawn(LLMAgent(capability, provider, registry, Some(uiBus),false), actorName)
-          if agentConfig.agentType == "llm-main" then
-            ctx.log.info(s"Spawning LLM-coordinator agent: $name")
-            agentMainOpt = Some(ctx.spawn(LLMAgent(capability, provider, registry, Some(uiBus)), actorName))
+          agentConfig.agentType match
+            case "llm" =>
+              ctx.log.info(s"Spawning LLM agent: $name")
+              ctx.spawn(
+                LLMAgent(capability, provider, registry, Some(uiBus), false),
+                actorName
+              )
+
+            case "llm-main" =>
+              ctx.log.info(s"Spawning LLM-coordinator agent: $name")
+              agentMainOpt = Some(
+                ctx.spawn(
+                  LLMAgent(capability, provider, registry, Some(uiBus)),
+                  actorName
+                )
+              )
+
+            case "web-crawler" =>
+              ctx.log.info(s"Spawning WebCrawler agent: $name")
+              ctx.spawn(
+                WebCrawlerAgent(capability, provider, registry, Some(uiBus)),
+                actorName
+              )
+
+            case other =>
+              ctx.log.warn(s"Unsupported agent type: $other")
         
           
 
