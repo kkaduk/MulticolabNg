@@ -7,10 +7,11 @@ Error from server: Agent failed: Feed host www.lawfirmpoland.com not allowed. Ex
 > Prepare idea of new bankin product based on information sumarization on RSS on site: https://www.lawfirmpoland.com/feed/
 Answer from HumanAgent:  # Results for: Prepare idea of new bankin product based on information sumarization on RSS on site: https://www.lawfirmpoland.com/feed/
 
+```
+
 ### [Step 1] Collect the RSS feed data from the law firm poland website
 ## RSS Briefing for https://www.lawfirmpoland.com/feed/
 
-```
 ---
 **Concise Briefing:**
 
