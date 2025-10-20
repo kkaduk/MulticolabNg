@@ -58,7 +58,10 @@ lazy val root = project
       "org.openjdk.jmh" % "jmh-generator-annprocess" % "1.37",
 
       // HTML parsing for crawler agent
-      "org.jsoup" % "jsoup" % "1.17.2"
+      "org.jsoup" % "jsoup" % "1.17.2",
+
+      // XML parsing for RSS agent
+      "org.scala-lang.modules" %% "scala-xml" % "2.3.0"
 
 
     ),

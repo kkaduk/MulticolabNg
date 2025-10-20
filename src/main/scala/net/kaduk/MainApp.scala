@@ -5,7 +5,7 @@ import org.apache.pekko.actor.typed.ActorRef
 import org.apache.pekko.actor.typed.scaladsl.Behaviors
 import org.apache.pekko.http.scaladsl.Http
 import org.apache.pekko.http.scaladsl.model.{HttpRequest, HttpResponse}
-import net.kaduk.agents.{LLMAgent, WebCrawlerAgent}
+import net.kaduk.agents.{LLMAgent, WebCrawlerAgent, RssReaderAgent}
 import net.kaduk.agents.BaseAgent
 import net.kaduk.infrastructure.llm.{OpenAIProvider, ClaudeProvider, OllamaProvider, VertexProvider}
 import net.kaduk.infrastructure.registry.AgentRegistry
@@ -45,6 +45,7 @@ object MainApp:
             else
               agentConfig.agentType match
                 case "web-crawler" => Set("search", "summarization")
+                case "rss-reader"  => Set("research", "summarization", "monitoring")
                 case _             => Set("text-generation")
 
           val baseConfig =
@@ -55,6 +56,7 @@ object MainApp:
           val agentTypeEnum = agentConfig.agentType match
             case "llm-main"    => AgentType.Orchestrator
             case "web-crawler" => AgentType.Specialist
+            case "rss-reader"  => AgentType.Specialist
             case _             => AgentType.LLM
 
           val capability = AgentCapability(
@@ -85,6 +87,13 @@ object MainApp:
               ctx.log.info(s"Spawning WebCrawler agent: $name")
               ctx.spawn(
                 WebCrawlerAgent(capability, provider, registry, Some(uiBus)),
+                actorName
+              )
+
+            case "rss-reader" =>
+              ctx.log.info(s"Spawning RSS reader agent: $name")
+              ctx.spawn(
+                RssReaderAgent(capability, provider, registry, Some(uiBus)),
                 actorName
               )
 
