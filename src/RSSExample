@@ -1,3 +1,6 @@
+## User enter question
+
+```
 HumanAgentClient ready. Type your message and press Enter. Ctrl+D to exit.
 > Prepare new bankimn product idea based on RSS feed search on the site: https://www.lawfirmpoland.com/feed/
 Error from server: Agent failed: Feed host www.lawfirmpoland.com not allowed. Expected domain ending with .pl.
@@ -7,6 +10,7 @@ Answer from HumanAgent:  # Results for: Prepare idea of new bankin product based
 ### [Step 1] Collect the RSS feed data from the law firm poland website
 ## RSS Briefing for https://www.lawfirmpoland.com/feed/
 
+```
 ---
 **Concise Briefing:**
 
