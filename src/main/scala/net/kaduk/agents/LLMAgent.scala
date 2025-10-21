@@ -8,7 +8,7 @@ import net.kaduk.domain.*
 import net.kaduk.infrastructure.llm.LLMProvider
 import net.kaduk.infrastructure.registry.AgentRegistry
 import net.kaduk.agents.BaseAgent.*
-import net.kaduk.telemetry.UiEventBus
+import net.kaduk.telemetry.{TelemetryUtils, UiEventBus}
 import org.slf4j.LoggerFactory
 import scala.concurrent.{ExecutionContext, Future}
 import scala.util.{Success, Failure, Try}
@@ -101,16 +101,13 @@ object LLMAgent:
         BaseAgent.withLogging(ctx, context.id) {
           ctx.log.info(s"[${capability.name}] Received message ${message.id}")
 
-          uiBus.foreach(
-            _ ! UiEventBus.Publish(
-              UiEventBus.ChatMessage(
-                context.id,
-                message.role.toString,
-                message.id,
-                message.content.text,
-                message.agentId
-              )
-            )
+          TelemetryUtils.chatMessage(
+            uiBus,
+            context.id,
+            message.role.toString,
+            message.id,
+            message.content.text,
+            message.agentId
           )
 
           if planningEnabled && shouldPlan(message, context) then
@@ -139,23 +136,20 @@ object LLMAgent:
             s"[${capability.name}] Planning task for message ${message.id}"
           )
 
-          uiBus.foreach { bus =>
-            val stateMsg = Message(
-              role = MessageRole.System,
-              content = MessageContent(s"Planning started"),
-              conversationId = context.id,
-              agentId = Some(capability.name)
-            )
-            bus ! UiEventBus.Publish(
-              UiEventBus.ChatMessage(
-                context.id,
-                stateMsg.role.toString,
-                stateMsg.id,
-                stateMsg.content.text,
-                stateMsg.agentId
-              )
-            )
-          }
+          val stateMsg = Message(
+            role = MessageRole.System,
+            content = MessageContent(s"Planning started"),
+            conversationId = context.id,
+            agentId = Some(capability.name)
+          )
+          TelemetryUtils.chatMessage(
+            uiBus,
+            context.id,
+            stateMsg.role.toString,
+            stateMsg.id,
+            stateMsg.content.text,
+            stateMsg.agentId
+          )
 
           ctx.pipeToSelf(
             createPlan(message, context, provider, registry, uiBus, capability)
@@ -166,18 +160,14 @@ object LLMAgent:
               )
 
               // Emit plan to UI
-              uiBus.foreach { bus =>
-                val stepInfos = planResp.plan.steps.map { s =>
-                  UiEventBus.StepInfo(
-                    s.id,
-                    s.targetCapability.getOrElse("unknown"),
-                    s.dependencies.toSeq
-                  )
-                }
-                bus ! UiEventBus.Publish(
-                  UiEventBus.PlanComputed(context.id, stepInfos)
+              val stepInfos = planResp.plan.steps.map { s =>
+                UiEventBus.StepInfo(
+                  s.id,
+                  s.targetCapability.getOrElse("unknown"),
+                  s.dependencies.toSeq
                 )
               }
+              TelemetryUtils.planComputed(uiBus, context.id, stepInfos)
 
               ExecutePlan(planResp.plan, context, replyTo)
 
@@ -186,13 +176,10 @@ object LLMAgent:
                 s"[${capability.name}] Planning failed: ${ex.getMessage}",
                 ex
               )
-              uiBus.foreach(
-                _ ! UiEventBus.Publish(
-                  UiEventBus.ErrorEvent(
-                    context.id,
-                    s"Planning failed: ${ex.getMessage}"
-                  )
-                )
+              TelemetryUtils.errorEvent(
+                uiBus,
+                context.id,
+                s"Planning failed: ${ex.getMessage}"
               )
               // Fall back to direct execution
               ProcessMessage(message, context, replyTo)
@@ -208,25 +195,22 @@ object LLMAgent:
           )
 
           // Publish state to UI
-          uiBus.foreach { bus =>
-            val stateMsg = Message(
-              role = MessageRole.System,
-              content = MessageContent(
-                s"Executing plan ${plan.id} with ${plan.steps.size} steps using ${plan.strategy} strategy"
-              ),
-              conversationId = context.id,
-              agentId = Some(capability.name)
-            )
-            bus ! UiEventBus.Publish(
-              UiEventBus.ChatMessage(
-                context.id,
-                stateMsg.role.toString,
-                stateMsg.id,
-                stateMsg.content.text,
-                stateMsg.agentId
-              )
-            )
-          }
+          val stateMsg = Message(
+            role = MessageRole.System,
+            content = MessageContent(
+              s"Executing plan ${plan.id} with ${plan.steps.size} steps using ${plan.strategy} strategy"
+            ),
+            conversationId = context.id,
+            agentId = Some(capability.name)
+          )
+          TelemetryUtils.chatMessage(
+            uiBus,
+            context.id,
+            stateMsg.role.toString,
+            stateMsg.id,
+            stateMsg.content.text,
+            stateMsg.agentId
+          )
 
           plan.strategy match {
             case ExecutionStrategy.Sequential =>
@@ -349,48 +333,41 @@ object LLMAgent:
         content = MessageContent(planPrompt),
         conversationId = context.id
       )
-      _ = uiBus.foreach { bus =>
-        bus ! UiEventBus.Publish(
-          UiEventBus.ChatMessage(
-            context.id,
-            sysMsg.role.toString,
-            sysMsg.id,
-            sysMsg.content.text,
-            Some(capability.name)
-          )
-        )
-        bus ! UiEventBus.Publish(
-          UiEventBus.ChatMessage(
-            context.id,
-            userMsg.role.toString,
-            userMsg.id,
-            userMsg.content.text,
-            Some(capability.name)
-          )
-        )
-      }
+      _ = TelemetryUtils.chatMessage(
+        uiBus,
+        context.id,
+        sysMsg.role.toString,
+        sysMsg.id,
+        sysMsg.content.text,
+        Some(capability.name)
+      )
+      _ = TelemetryUtils.chatMessage(
+        uiBus,
+        context.id,
+        userMsg.role.toString,
+        userMsg.id,
+        userMsg.content.text,
+        Some(capability.name)
+      )
       planJson <- provider.completion(
         Seq(sysMsg, userMsg),
         systemPrompt = ""
       )
       // Publish assistant plan JSON
-      publishPlan = uiBus.foreach { bus =>
-        val planMsg = Message(
-          role = MessageRole.Assistant,
-          content = MessageContent(planJson),
-          conversationId = context.id,
-          agentId = Some(capability.name)
-        )
-        bus ! UiEventBus.Publish(
-          UiEventBus.ChatMessage(
-            context.id,
-            planMsg.role.toString,
-            planMsg.id,
-            planMsg.content.text,
-            planMsg.agentId
-          )
-        )
-      }
+      planMsg = Message(
+        role = MessageRole.Assistant,
+        content = MessageContent(planJson),
+        conversationId = context.id,
+        agentId = Some(capability.name)
+      )
+      _ = TelemetryUtils.chatMessage(
+        uiBus,
+        context.id,
+        planMsg.role.toString,
+        planMsg.id,
+        planMsg.content.text,
+        planMsg.agentId
+      )
 
       // Parse plan
       plan <- Future.fromTry(parsePlan(planJson, message, context))
@@ -577,11 +554,7 @@ Output only JSON — nothing else.
         )
           .map { case (result, newCtx) =>
             // Emit step completion to UI bus
-            uiBus.foreach(
-              _ ! UiEventBus.Publish(
-                UiEventBus.StepCompleted(ctxAcc.id, step.id)
-              )
-            )
+            TelemetryUtils.stepCompleted(uiBus, ctxAcc.id, step.id)
             (accResults + (step.id -> result), newCtx)
           }
       }
@@ -596,21 +569,18 @@ Output only JSON — nothing else.
           conversationId = finalCtx.id,
           agentId = Some(ctx.self.path.name)
         )
-        uiBus.foreach(
-          _ ! UiEventBus.Publish(
-            UiEventBus.ChatMessage(
-              finalCtx.id,
-              responseMsg.role.toString,
-              responseMsg.id,
-              responseMsg.content.text,
-              responseMsg.agentId
-            )
-          )
+        TelemetryUtils.chatMessage(
+          uiBus,
+          finalCtx.id,
+          responseMsg.role.toString,
+          responseMsg.id,
+          responseMsg.content.text,
+          responseMsg.agentId
         )
-        uiBus.foreach(
-          _ ! UiEventBus.Publish(
-            UiEventBus.AggregateCompleted(finalCtx.id, finalResult.length)
-          )
+        TelemetryUtils.aggregateCompleted(
+          uiBus,
+          finalCtx.id,
+          finalResult.length
         )
         replyTo ! ProcessedMessage(
           responseMsg,
@@ -620,13 +590,10 @@ Output only JSON — nothing else.
 
       case Failure(ex) =>
         ctx.log.error(s"[${capability.name}] Sequential execution failed", ex)
-        uiBus.foreach(
-          _ ! UiEventBus.Publish(
-            UiEventBus.ErrorEvent(
-              context.id,
-              s"Sequential failure: ${ex.getMessage}"
-            )
-          )
+        TelemetryUtils.errorEvent(
+          uiBus,
+          context.id,
+          s"Sequential failure: ${ex.getMessage}"
         )
         replyTo ! ProcessingFailed(ex.getMessage, context.id)
         NoOp
@@ -676,21 +643,14 @@ Output only JSON — nothing else.
             capability
           )
             .map { case (res, _) =>
-              // Emit step completion to UI bus
-              uiBus.foreach(
-                _ ! UiEventBus
-                  .Publish(UiEventBus.StepCompleted(context.id, step.id))
-              )
+              TelemetryUtils.stepCompleted(uiBus, context.id, step.id)
               Right(step.id -> res)
             }
             .recover { case ex =>
-              uiBus.foreach(
-                _ ! UiEventBus.Publish(
-                  UiEventBus.ErrorEvent(
-                    context.id,
-                    s"Step ${step.id} failure: ${ex.getMessage}"
-                  )
-                )
+              TelemetryUtils.errorEvent(
+                uiBus,
+                context.id,
+                s"Step ${step.id} failure: ${ex.getMessage}"
               )
               Left(step.id -> ex)
             }
@@ -710,25 +670,22 @@ Output only JSON — nothing else.
           conversationId = context.id,
           agentId = Some(ctx.self.path.name)
         )
-        uiBus.foreach(
-          _ ! UiEventBus.Publish(
-            UiEventBus.ChatMessage(
-              context.id,
-              responseMsg.role.toString,
-              responseMsg.id,
-              responseMsg.content.text,
-              responseMsg.agentId
-            )
-          )
+        TelemetryUtils.chatMessage(
+          uiBus,
+          context.id,
+          responseMsg.role.toString,
+          responseMsg.id,
+          responseMsg.content.text,
+          responseMsg.agentId
         )
 
         ctx.log.info(
           s"[${capability.name}] Parallel execution completed with ${successes.size}/${independentSteps.size} successes"
         )
-        uiBus.foreach(
-          _ ! UiEventBus.Publish(
-            UiEventBus.AggregateCompleted(context.id, finalResult.length)
-          )
+        TelemetryUtils.aggregateCompleted(
+          uiBus,
+          context.id,
+          finalResult.length
         )
 
         replyTo ! ProcessedMessage(responseMsg, context.addMessage(responseMsg))
@@ -736,11 +693,7 @@ Output only JSON — nothing else.
 
       case Failure(ex) =>
         ctx.log.error(s"[${capability.name}] Parallel execution failed", ex)
-        uiBus.foreach(
-          _ ! UiEventBus.Publish(
-            UiEventBus.ErrorEvent(context.id, ex.getMessage)
-          )
-        )
+        TelemetryUtils.errorEvent(uiBus, context.id, ex.getMessage)
         replyTo ! ProcessingFailed(ex.getMessage, context.id)
         NoOp
     }
@@ -888,25 +841,21 @@ Output only JSON — nothing else.
     )
 
     // Publish chat and dispatch info
-    uiBus.foreach { bus =>
-      bus ! UiEventBus.Publish(
-        UiEventBus.ChatMessage(
-          context.id,
-          message.role.toString,
-          message.id,
-          message.content.text,
-          Some(capability.name)
-        )
-      )
-      bus ! UiEventBus.Publish(
-        UiEventBus.StepDispatched(
-          context.id,
-          step.id,
-          step.targetCapability.getOrElse("unknown"),
-          message.id
-        )
-      )
-    }
+    TelemetryUtils.chatMessage(
+      uiBus,
+      context.id,
+      message.role.toString,
+      message.id,
+      message.content.text,
+      Some(capability.name)
+    )
+    TelemetryUtils.stepDispatched(
+      uiBus,
+      context.id,
+      step.id,
+      step.targetCapability.getOrElse("unknown"),
+      message.id
+    )
 
     val maxClarificationRounds = capability.config
       .get("maxClarificationRounds")
@@ -942,17 +891,14 @@ Output only JSON — nothing else.
   )(using ctx: ActorContext[Command], ec: ExecutionContext): Future[(Message, ConversationContext)] =
 
     if publishOutbound then
-      uiBus.foreach { bus =>
-        bus ! UiEventBus.Publish(
-          UiEventBus.ChatMessage(
-            context.id,
-            outbound.role.toString,
-            outbound.id,
-            outbound.content.text,
-            outbound.agentId.orElse(Some(capability.name))
-          )
-        )
-      }
+      TelemetryUtils.chatMessage(
+        uiBus,
+        context.id,
+        outbound.role.toString,
+        outbound.id,
+        outbound.content.text,
+        outbound.agentId.orElse(Some(capability.name))
+      )
 
     import org.apache.pekko.actor.typed.scaladsl.AskPattern.*
     import org.apache.pekko.actor.typed.ActorSystem
@@ -967,17 +913,14 @@ Output only JSON — nothing else.
       )
       .flatMap {
         case ProcessedMessage(response, _) =>
-          uiBus.foreach { bus =>
-            bus ! UiEventBus.Publish(
-              UiEventBus.ChatMessage(
-                context.id,
-                response.role.toString,
-                response.id,
-                response.content.text,
-                response.agentId.orElse(Some(agent.path.name))
-              )
-            )
-          }
+          TelemetryUtils.chatMessage(
+            uiBus,
+            context.id,
+            response.role.toString,
+            response.id,
+            response.content.text,
+            response.agentId.orElse(Some(agent.path.name))
+          )
           val updatedContext =
             context.addMessage(outbound).addMessage(response)
           Future.successful(response -> updatedContext)
@@ -1171,25 +1114,21 @@ Output only JSON — nothing else.
       conversationId = context.id
     )
     // Publish the prompt and dispatch
-    uiBus.foreach { bus =>
-      bus ! UiEventBus.Publish(
-        UiEventBus.ChatMessage(
-          context.id,
-          userMsg.role.toString,
-          userMsg.id,
-          userMsg.content.text,
-          Some(capability.name)
-        )
-      )
-      bus ! UiEventBus.Publish(
-        UiEventBus.StepDispatched(
-          context.id,
-          step.id,
-          capability.name,
-          userMsg.id
-        )
-      )
-    }
+    TelemetryUtils.chatMessage(
+      uiBus,
+      context.id,
+      userMsg.role.toString,
+      userMsg.id,
+      userMsg.content.text,
+      Some(capability.name)
+    )
+    TelemetryUtils.stepDispatched(
+      uiBus,
+      context.id,
+      step.id,
+      capability.name,
+      userMsg.id
+    )
     provider
       .completion(
         Seq(userMsg),
@@ -1204,17 +1143,14 @@ Output only JSON — nothing else.
           conversationId = context.id,
           agentId = Some(capability.name)
         )
-        uiBus.foreach { bus =>
-          bus ! UiEventBus.Publish(
-            UiEventBus.ChatMessage(
-              context.id,
-              respMsg.role.toString,
-              respMsg.id,
-              respMsg.content.text,
-              respMsg.agentId
-            )
-          )
-        }
+        TelemetryUtils.chatMessage(
+          uiBus,
+          context.id,
+          respMsg.role.toString,
+          respMsg.id,
+          respMsg.content.text,
+          respMsg.agentId
+        )
         txt
       }
 
@@ -1278,38 +1214,32 @@ Output only JSON — nothing else.
 
     val stepId = message.content.metadata.getOrElse("stepId", "direct")
     ctx.log.info(s"[${capability.name}] Direct execution stepId=$stepId")
-    uiBus.foreach(
-      _ ! UiEventBus.Publish(
-        UiEventBus.AgentStart(
-          context.id,
-          capability.name,
-          stepId,
-          message.id,
-          false
-        )
-      )
+    TelemetryUtils.agentStart(
+      uiBus,
+      context.id,
+      capability.name,
+      stepId,
+      message.id,
+      refinement = false
     )
-    uiBus.foreach { bus =>
-      val sysText = capability.config.getOrElse(
-        "systemPrompt",
-        "You are a helpful assistant"
-      )
-      val sysMsg = Message(
-        role = MessageRole.System,
-        content = MessageContent(sysText),
-        conversationId = context.id,
-        agentId = Some(capability.name)
-      )
-      bus ! UiEventBus.Publish(
-        UiEventBus.ChatMessage(
-          context.id,
-          sysMsg.role.toString,
-          sysMsg.id,
-          sysMsg.content.text,
-          sysMsg.agentId
-        )
-      )
-    }
+    val sysText = capability.config.getOrElse(
+      "systemPrompt",
+      "You are a helpful assistant"
+    )
+    val sysMsg = Message(
+      role = MessageRole.System,
+      content = MessageContent(sysText),
+      conversationId = context.id,
+      agentId = Some(capability.name)
+    )
+    TelemetryUtils.chatMessage(
+      uiBus,
+      context.id,
+      sysMsg.role.toString,
+      sysMsg.id,
+      sysMsg.content.text,
+      sysMsg.agentId
+    )
 
     ctx.pipeToSelf(
       provider.completion(
@@ -1325,27 +1255,21 @@ Output only JSON — nothing else.
           conversationId = context.id,
           agentId = Some(ctx.self.path.name)
         )
-        uiBus.foreach(
-          _ ! UiEventBus.Publish(
-            UiEventBus.ChatMessage(
-              context.id,
-              responseMsg.role.toString,
-              responseMsg.id,
-              responseMsg.content.text,
-              responseMsg.agentId
-            )
-          )
+        TelemetryUtils.chatMessage(
+          uiBus,
+          context.id,
+          responseMsg.role.toString,
+          responseMsg.id,
+          responseMsg.content.text,
+          responseMsg.agentId
         )
-        uiBus.foreach(
-          _ ! UiEventBus.Publish(
-            UiEventBus.AgentComplete(
-              context.id,
-              capability.name,
-              stepId,
-              responseMsg.id,
-              response.length
-            )
-          )
+        TelemetryUtils.agentComplete(
+          uiBus,
+          context.id,
+          capability.name,
+          stepId,
+          responseMsg.id,
+          response.length
         )
         replyTo ! ProcessedMessage(
           responseMsg,
@@ -1355,11 +1279,7 @@ Output only JSON — nothing else.
 
       case Failure(ex) =>
         ctx.log.error(s"[${capability.name}] Direct execution failed", ex)
-        uiBus.foreach(
-          _ ! UiEventBus.Publish(
-            UiEventBus.ErrorEvent(context.id, ex.getMessage)
-          )
-        )
+        TelemetryUtils.errorEvent(uiBus, context.id, ex.getMessage)
         replyTo ! ProcessingFailed(ex.getMessage, message.id)
         NoOp
     }
@@ -1391,47 +1311,38 @@ Output only JSON — nothing else.
 
     val stepId = message.content.metadata.getOrElse("stepId", "stream")
     ctx.log.info(s"[${capability.name}] Streaming stepId=$stepId")
-    uiBus.foreach(
-      _ ! UiEventBus.Publish(
-        UiEventBus.AgentStart(
-          context.id,
-          capability.name,
-          stepId,
-          message.id,
-          false
-        )
-      )
+    TelemetryUtils.agentStart(
+      uiBus,
+      context.id,
+      capability.name,
+      stepId,
+      message.id,
+      refinement = false
     )
-    uiBus.foreach(
-      _ ! UiEventBus.Publish(
-        UiEventBus.ChatMessage(
-          context.id,
-          message.role.toString,
-          message.id,
-          message.content.text,
-          message.agentId
-        )
-      )
+    TelemetryUtils.chatMessage(
+      uiBus,
+      context.id,
+      message.role.toString,
+      message.id,
+      message.content.text,
+      message.agentId
     )
-    uiBus.foreach { bus =>
-      val sysText = capability.config.getOrElse("systemPrompt", "")
-      if sysText.nonEmpty then
-        val sysMsg = Message(
-          role = MessageRole.System,
-          content = MessageContent(sysText),
-          conversationId = context.id,
-          agentId = Some(capability.name)
-        )
-        bus ! UiEventBus.Publish(
-          UiEventBus.ChatMessage(
-            context.id,
-            sysMsg.role.toString,
-            sysMsg.id,
-            sysMsg.content.text,
-            sysMsg.agentId
-          )
-        )
-    }
+    val sysTextStream = capability.config.getOrElse("systemPrompt", "")
+    if sysTextStream.nonEmpty then
+      val sysMsg = Message(
+        role = MessageRole.System,
+        content = MessageContent(sysTextStream),
+        conversationId = context.id,
+        agentId = Some(capability.name)
+      )
+      TelemetryUtils.chatMessage(
+        uiBus,
+        context.id,
+        sysMsg.role.toString,
+        sysMsg.id,
+        sysMsg.content.text,
+        sysMsg.agentId
+      )
 
     val stream = provider.streamCompletion(
       context.messages.toSeq :+ message,
@@ -1441,16 +1352,13 @@ Output only JSON — nothing else.
     stream.runForeach { token =>
       replyTo ! StreamChunk(token.content, token.messageId)
       if token.content.nonEmpty then
-        uiBus.foreach(
-          _ ! UiEventBus.Publish(
-            UiEventBus.ChatMessage(
-              context.id,
-              MessageRole.Assistant.toString,
-              token.messageId,
-              token.content,
-              Some(ctx.self.path.name)
-            )
-          )
+        TelemetryUtils.chatMessage(
+          uiBus,
+          context.id,
+          MessageRole.Assistant.toString,
+          token.messageId,
+          token.content,
+          Some(ctx.self.path.name)
         )
     }
 
@@ -1462,38 +1370,28 @@ Output only JSON — nothing else.
           conversationId = context.id,
           agentId = Some(ctx.self.path.name)
         )
-        uiBus.foreach(
-          _ ! UiEventBus.Publish(
-            UiEventBus.ChatMessage(
-              context.id,
-              responseMsg.role.toString,
-              responseMsg.id,
-              responseMsg.content.text,
-              responseMsg.agentId
-            )
-          )
+        TelemetryUtils.chatMessage(
+          uiBus,
+          context.id,
+          responseMsg.role.toString,
+          responseMsg.id,
+          responseMsg.content.text,
+          responseMsg.agentId
         )
-        uiBus.foreach(
-          _ ! UiEventBus.Publish(
-            UiEventBus.AgentComplete(
-              context.id,
-              capability.name,
-              stepId,
-              responseMsg.id,
-              fullResponse.length
-            )
-          )
+        TelemetryUtils.agentComplete(
+          uiBus,
+          context.id,
+          capability.name,
+          stepId,
+          responseMsg.id,
+          fullResponse.length
         )
         replyTo ! StreamComplete(responseMsg)
         NoOp
 
       case Failure(ex) =>
         ctx.log.error(s"[${capability.name}] Streaming failed", ex)
-        uiBus.foreach(
-          _ ! UiEventBus.Publish(
-            UiEventBus.ErrorEvent(context.id, ex.getMessage)
-          )
-        )
+        TelemetryUtils.errorEvent(uiBus, context.id, ex.getMessage)
         replyTo ! StreamError(ex.getMessage)
         NoOp
     }

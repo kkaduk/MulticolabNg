@@ -3,7 +3,7 @@ package net.kaduk.agents
 import net.kaduk.domain.*
 import net.kaduk.infrastructure.llm.LLMProvider
 import net.kaduk.infrastructure.registry.AgentRegistry
-import net.kaduk.telemetry.UiEventBus
+import net.kaduk.telemetry.{TelemetryUtils, UiEventBus}
 
 import org.apache.pekko
 import pekko.actor.typed.{ActorRef, Behavior}
@@ -115,21 +115,21 @@ object RssReaderAgent:
 
     val workingContext = integrateFeedClarification(message, context)
 
-    uiBus.foreach(
-      _ ! UiEventBus.Publish(
-        UiEventBus.AgentStart(context.id, capability.name, stepId, message.id, false)
-      )
+    TelemetryUtils.agentStart(
+      uiBus,
+      context.id,
+      capability.name,
+      stepId,
+      message.id,
+      refinement = false
     )
-    uiBus.foreach(
-      _ ! UiEventBus.Publish(
-        UiEventBus.ChatMessage(
-          context.id,
-          message.role.toString,
-          message.id,
-          message.content.text,
-          message.agentId
-        )
-      )
+    TelemetryUtils.chatMessage(
+      uiBus,
+      context.id,
+      message.role.toString,
+      message.id,
+      message.content.text,
+      message.agentId
     )
 
     resolveFeedUrl(message, workingContext, capability) match
@@ -148,9 +148,7 @@ object RssReaderAgent:
           replyTo ! request
         else
           ctx.log.warn(s"[${capability.name}] Unable to resolve feed URL: $err")
-          uiBus.foreach(
-            _ ! UiEventBus.Publish(UiEventBus.ErrorEvent(context.id, err))
-          )
+          TelemetryUtils.errorEvent(uiBus, context.id, err)
           replyTo ! BaseAgent.ProcessingFailed(err, message.id)
 
       case Right(url) =>
@@ -178,26 +176,22 @@ object RssReaderAgent:
               agentId = Some(capability.name)
             )
 
-            uiBus.foreach { bus =>
-              bus ! UiEventBus.Publish(
-                UiEventBus.ChatMessage(
-                  enrichedContext.id,
-                  responseMsg.role.toString,
-                  responseMsg.id,
-                  responseMsg.content.text,
-                  responseMsg.agentId
-                )
-              )
-              bus ! UiEventBus.Publish(
-                UiEventBus.AgentComplete(
-                  enrichedContext.id,
-                  capability.name,
-                  stepId,
-                  responseMsg.id,
-                  responseMsg.content.text.length
-                )
-              )
-            }
+            TelemetryUtils.chatMessage(
+              uiBus,
+              enrichedContext.id,
+              responseMsg.role.toString,
+              responseMsg.id,
+              responseMsg.content.text,
+              responseMsg.agentId
+            )
+            TelemetryUtils.agentComplete(
+              uiBus,
+              enrichedContext.id,
+              capability.name,
+              stepId,
+              responseMsg.id,
+              responseMsg.content.text.length
+            )
 
             replyTo ! BaseAgent.ProcessedMessage(
               responseMsg,
@@ -209,9 +203,7 @@ object RssReaderAgent:
           case Failure(ex) =>
             val msg = s"RSS fetch failed: ${ex.getMessage}"
             ctx.log.error(msg, ex)
-            uiBus.foreach(
-              _ ! UiEventBus.Publish(UiEventBus.ErrorEvent(context.id, msg))
-            )
+            TelemetryUtils.errorEvent(uiBus, context.id, msg)
             replyTo ! BaseAgent.ProcessingFailed(msg, message.id)
         }
 

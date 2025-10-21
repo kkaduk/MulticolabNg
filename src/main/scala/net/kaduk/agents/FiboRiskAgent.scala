@@ -3,7 +3,7 @@ package net.kaduk.agents
 import net.kaduk.domain.*
 import net.kaduk.infrastructure.llm.LLMProvider
 import net.kaduk.infrastructure.registry.AgentRegistry
-import net.kaduk.telemetry.UiEventBus
+import net.kaduk.telemetry.{TelemetryUtils, UiEventBus}
 
 import org.apache.pekko
 import pekko.actor.typed.{ActorRef, Behavior}
@@ -98,21 +98,21 @@ object FiboRiskAgent:
     val stepId = message.content.metadata.getOrElse("stepId", "fibo-risk")
     ctx.log.info(s"[${capability.name}] Performing FIBO risk analysis step=$stepId")
 
-    uiBus.foreach(
-      _ ! UiEventBus.Publish(
-        UiEventBus.AgentStart(context.id, capability.name, stepId, message.id, false)
-      )
+    TelemetryUtils.agentStart(
+      uiBus,
+      context.id,
+      capability.name,
+      stepId,
+      message.id,
+      refinement = false
     )
-    uiBus.foreach(
-      _ ! UiEventBus.Publish(
-        UiEventBus.ChatMessage(
-          context.id,
-          message.role.toString,
-          message.id,
-          message.content.text,
-          message.agentId
-        )
-      )
+    TelemetryUtils.chatMessage(
+      uiBus,
+      context.id,
+      message.role.toString,
+      message.id,
+      message.content.text,
+      message.agentId
     )
     val attempt = message.content.metadata
       .get("clarificationAttempt")
@@ -186,26 +186,22 @@ object FiboRiskAgent:
               agentId = Some(capability.name)
             )
 
-            uiBus.foreach { bus =>
-              bus ! UiEventBus.Publish(
-                UiEventBus.ChatMessage(
-                  analysisContext.id,
-                  responseMsg.role.toString,
-                  responseMsg.id,
-                  responseMsg.content.text,
-                  responseMsg.agentId
-                )
-              )
-              bus ! UiEventBus.Publish(
-                UiEventBus.AgentComplete(
-                  analysisContext.id,
-                  capability.name,
-                  stepId,
-                  responseMsg.id,
-                  responseMsg.content.text.length
-                )
-              )
-            }
+            TelemetryUtils.chatMessage(
+              uiBus,
+              analysisContext.id,
+              responseMsg.role.toString,
+              responseMsg.id,
+              responseMsg.content.text,
+              responseMsg.agentId
+            )
+            TelemetryUtils.agentComplete(
+              uiBus,
+              analysisContext.id,
+              capability.name,
+              stepId,
+              responseMsg.id,
+              responseMsg.content.text.length
+            )
 
             replyTo ! BaseAgent.ProcessedMessage(
               responseMsg,
@@ -217,9 +213,7 @@ object FiboRiskAgent:
           case Failure(ex) =>
             val err = s"FIBO risk analysis failed: ${ex.getMessage}"
             ctx.log.error(err, ex)
-            uiBus.foreach(
-              _ ! UiEventBus.Publish(UiEventBus.ErrorEvent(context.id, err))
-            )
+            TelemetryUtils.errorEvent(uiBus, context.id, err)
             replyTo ! BaseAgent.ProcessingFailed(err, message.id)
         }
 
