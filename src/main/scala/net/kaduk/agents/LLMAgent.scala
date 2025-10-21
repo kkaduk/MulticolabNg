@@ -811,7 +811,15 @@ Output only JSON — nothing else.
           log.info(
             s"[executeStep] Delegating step ${step.id} to agent ${agent.path.name}"
           )
-          delegateToAgent(agent, step, context, priorResults, uiBus, capability)
+          delegateToAgent(
+            agent,
+            step,
+            context,
+            priorResults,
+            registry,
+            uiBus,
+            capability
+          )
 
         case None =>
           log.info(
@@ -866,16 +874,10 @@ Output only JSON — nothing else.
       step: PlanStep,
       context: ConversationContext,
       priorResults: Map[String, String],
+      registry: AgentRegistry,
       uiBus: Option[ActorRef[UiEventBus.Command]],
       capability: AgentCapability
   )(using ctx: ActorContext[Command], ec: ExecutionContext): Future[String] =
-
-    import org.apache.pekko.actor.typed.scaladsl.AskPattern.*
-    import org.apache.pekko.actor.typed.ActorSystem
-    import org.apache.pekko.actor.typed.scaladsl.AskPattern.schedulerFromActorSystem
-    import org.apache.pekko.util.Timeout
-    given Timeout = 360.seconds
-    given ActorSystem[?] = ctx.system
 
     val enrichedPrompt = buildStepPrompt(step, priorResults, context)
     val message = Message(
@@ -906,9 +908,62 @@ Output only JSON — nothing else.
       )
     }
 
+    val maxClarificationRounds = capability.config
+      .get("maxClarificationRounds")
+      .flatMap(v => Try(v.toInt).toOption)
+      .getOrElse(5)
+
+    dialogueWithAgent(
+      agent,
+      message,
+      context,
+      registry,
+      uiBus,
+      capability,
+      step,
+      depth = 0,
+      maxDepth = maxClarificationRounds,
+      publishOutbound = false
+    ).map { case (finalMessage, _) =>
+      finalMessage.content.text
+    }
+
+  private def dialogueWithAgent(
+      agent: ActorRef[BaseAgent.Command],
+      outbound: Message,
+      context: ConversationContext,
+      registry: AgentRegistry,
+      uiBus: Option[ActorRef[UiEventBus.Command]],
+      capability: AgentCapability,
+      step: PlanStep,
+      depth: Int,
+      maxDepth: Int,
+      publishOutbound: Boolean
+  )(using ctx: ActorContext[Command], ec: ExecutionContext): Future[(Message, ConversationContext)] =
+
+    if publishOutbound then
+      uiBus.foreach { bus =>
+        bus ! UiEventBus.Publish(
+          UiEventBus.ChatMessage(
+            context.id,
+            outbound.role.toString,
+            outbound.id,
+            outbound.content.text,
+            outbound.agentId.orElse(Some(capability.name))
+          )
+        )
+      }
+
+    import org.apache.pekko.actor.typed.scaladsl.AskPattern.*
+    import org.apache.pekko.actor.typed.ActorSystem
+    import org.apache.pekko.actor.typed.scaladsl.AskPattern.schedulerFromActorSystem
+    import org.apache.pekko.util.Timeout
+    given Timeout = 360.seconds
+    given ActorSystem[?] = ctx.system
+
     agent
       .ask[Command](replyTo =>
-        ProcessMessage(message, context, replyTo.unsafeUpcast[Any])
+        ProcessMessage(outbound, context, replyTo.unsafeUpcast[Any])
       )
       .flatMap {
         case ProcessedMessage(response, _) =>
@@ -923,12 +978,182 @@ Output only JSON — nothing else.
               )
             )
           }
-          Future.successful(response.content.text)
+          val updatedContext =
+            context.addMessage(outbound).addMessage(response)
+          Future.successful(response -> updatedContext)
+
+        case req: ClarificationRequest =>
+          if depth >= maxDepth then
+            Future.failed(
+              new RuntimeException(
+                s"Clarification limit reached for step ${step.id}"
+              )
+            )
+          else
+            resolveClarification(
+              req,
+              agent,
+              registry,
+              uiBus,
+              capability,
+              step,
+              depth,
+              maxDepth
+            ).flatMap { case (followUpMessage, followUpContext) =>
+              dialogueWithAgent(
+                agent,
+                followUpMessage,
+                followUpContext,
+                registry,
+                uiBus,
+                capability,
+                step,
+                depth + 1,
+                maxDepth,
+                publishOutbound = true
+              )
+            }
+
         case ProcessingFailed(error, _) =>
           Future.failed(new RuntimeException(s"Agent failed: $error"))
+
         case other =>
           Future.failed(new RuntimeException(s"Unexpected response: $other"))
       }
+
+  private def resolveClarification(
+      request: ClarificationRequest,
+      requestingAgent: ActorRef[BaseAgent.Command],
+      registry: AgentRegistry,
+      uiBus: Option[ActorRef[UiEventBus.Command]],
+      capability: AgentCapability,
+      step: PlanStep,
+      depth: Int,
+      maxDepth: Int
+  )(using ctx: ActorContext[Command], ec: ExecutionContext): Future[(Message, ConversationContext)] =
+
+    val (capTargets, skillTargets) = extractClarificationTargets(request)
+    findClarifier(capTargets, skillTargets, registry, requestingAgent).flatMap {
+      case Some(clarifier) =>
+        val clarificationMessage = request.question.copy(
+          role = MessageRole.Agent,
+          conversationId = request.context.id,
+          agentId = request.question.agentId.orElse(Some(capability.name))
+        )
+
+        dialogueWithAgent(
+          clarifier,
+          clarificationMessage,
+          request.context,
+          registry,
+          uiBus,
+          capability,
+          step,
+          depth + 1,
+          maxDepth,
+          publishOutbound = true
+        ).map { case (clarifierAnswer, updatedContext) =>
+          val followUp =
+            buildClarificationFollowUp(request, clarifierAnswer, clarifier)
+          followUp -> updatedContext
+        }
+
+      case None =>
+        Future.failed(
+          new RuntimeException(
+            s"No agent available to clarify request ${request.question.id} for step ${step.id}"
+          )
+        )
+    }
+
+  private def extractClarificationTargets(
+      request: ClarificationRequest
+  ): (Seq[String], Set[String]) =
+    val metaCaps =
+      request.metadata
+        .get("clarificationCapability")
+        .toSeq
+        .flatMap(_.split(",").map(_.trim).filter(_.nonEmpty)) ++
+        request.question.content.metadata
+          .get("clarificationCapability")
+          .toSeq
+          .flatMap(_.split(",").map(_.trim).filter(_.nonEmpty))
+
+    val explicitCaps =
+      (request.targetCapabilities ++ metaCaps).map(_.trim.toLowerCase).toSeq.distinct
+
+    val metaSkills =
+      request.metadata
+        .get("clarificationSkill")
+        .toSeq
+        .flatMap(_.split(",").map(_.trim).filter(_.nonEmpty)) ++
+        request.question.content.metadata
+          .get("clarificationSkill")
+          .toSeq
+          .flatMap(_.split(",").map(_.trim).filter(_.nonEmpty))
+
+    val explicitSkills =
+      (request.targetSkills ++ metaSkills).map(_.trim.toLowerCase).filter(_.nonEmpty)
+
+    (explicitCaps, explicitSkills)
+
+  private def findClarifier(
+      capabilities: Seq[String],
+      skills: Set[String],
+      registry: AgentRegistry,
+      requestingAgent: ActorRef[BaseAgent.Command]
+  )(using ec: ExecutionContext): Future[Option[ActorRef[BaseAgent.Command]]] =
+
+    def tryCapabilities(remaining: Seq[String]): Future[Option[ActorRef[BaseAgent.Command]]] =
+      remaining match
+        case head +: tail =>
+          registry.findAgent(head).flatMap {
+            case Some(ref) if ref != requestingAgent => Future.successful(Some(ref))
+            case _                                   => tryCapabilities(tail)
+          }
+        case _ =>
+          if skills.nonEmpty then
+            registry
+              .findAgentsByAnySkill(skills)
+              .map(_.find(_ != requestingAgent))
+          else Future.successful(None)
+
+    tryCapabilities(capabilities)
+
+  private def buildClarificationFollowUp(
+      request: ClarificationRequest,
+      clarifierAnswer: Message,
+      clarifier: ActorRef[BaseAgent.Command]
+  ): Message =
+
+    val mergedMetadata =
+      (request.metadata ++ request.question.content.metadata ++ clarifierAnswer.content.metadata)
+        .filter { case (_, value) => value != null && value.nonEmpty }
+
+    val clarificationId =
+      mergedMetadata
+        .get("clarificationId")
+        .getOrElse(UUID.randomUUID().toString)
+
+    val topic =
+      mergedMetadata.getOrElse("clarificationTopic", "")
+
+    Message(
+      role = MessageRole.Agent,
+      content = MessageContent(
+        clarifierAnswer.content.text,
+        metadata = mergedMetadata ++ Map(
+          "clarificationResolved" -> "true",
+          "clarificationId" -> clarificationId,
+          "clarificationTopic" -> topic,
+          "clarificationSource" -> clarifierAnswer.agentId
+            .getOrElse(clarifier.path.name),
+          "stepId" -> request.originalStepId
+        )
+      ),
+      conversationId = request.context.id,
+      agentId = clarifierAnswer.agentId.orElse(Some(clarifier.path.name))
+    )
 
   private def executeSelfContained(
       step: PlanStep,

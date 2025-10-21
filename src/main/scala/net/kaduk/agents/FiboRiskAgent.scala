@@ -10,7 +10,8 @@ import pekko.actor.typed.{ActorRef, Behavior}
 import pekko.actor.typed.scaladsl.{ActorContext, Behaviors}
 
 import scala.concurrent.ExecutionContext
-import scala.util.{Failure, Success}
+import scala.util.{Failure, Success, Try}
+import java.util.UUID
 
 object FiboRiskAgent:
 
@@ -113,80 +114,121 @@ object FiboRiskAgent:
         )
       )
     )
-    //FIXME - use my FIBO RISK assesment ontology server. (IT IS ONLY DEMO)
-    val prompt = buildPrompt(message, context, capability)
-    val userMsg = Message(
-      role = MessageRole.User,
-      content = MessageContent(prompt, metadata = Map("stepId" -> stepId)),
-      conversationId = context.id
-    )
+    val attempt = message.content.metadata
+      .get("clarificationAttempt")
+      .flatMap(v => Try(v.toInt).toOption)
+      .getOrElse(0)
 
-    provider
-      .completion(
-        Seq(userMsg),
-        capability.config.getOrElse(
-          "systemPrompt",
-          "You are a banking risk officer. Ground every assessment in the FIBO ontology definitions provided."
-        )
+    val maxAttempts = capability.config
+      .get("maxClarificationRounds")
+      .flatMap(v => Try(v.toInt).toOption)
+      .getOrElse(3)
+
+    val contextWithDetails = integrateClarificationIntoContext(message, context)
+    val productDetailsOpt = extractProductDetails(message, contextWithDetails)
+    val minDetailLength = capability.config
+      .get("minDetailLength")
+      .flatMap(v => Try(v.toInt).toOption)
+      .getOrElse(60)
+
+    val detailIsWeak =
+      productDetailsOpt.forall(text => text.trim.isEmpty || text.trim.length < minDetailLength)
+
+    if detailIsWeak && attempt < maxAttempts then
+      val request = buildProductClarificationRequest(
+        capability,
+        contextWithDetails,
+        stepId,
+        attempt + 1
       )
-      .onComplete {
-        case Success(resultText) =>
-          val responseMsg = Message(
-            role = MessageRole.Assistant,
-            content = MessageContent(
-              resultText,
-              metadata = Map(
-                "satisfied" -> "true",
-                "analysisFramework" -> "FIBO"
-              )
-            ),
-            conversationId = context.id,
-            agentId = Some(capability.name)
-          )
+      ctx.log.info(
+        s"[${capability.name}] Requesting product clarification (attempt ${attempt + 1})"
+      )
+      replyTo ! request
+      ()
+    else
+      val productDetails = productDetailsOpt
+        .filter(_.nonEmpty)
+        .getOrElse(message.content.text.trim)
 
-          uiBus.foreach { bus =>
-            bus ! UiEventBus.Publish(
-              UiEventBus.ChatMessage(
-                context.id,
-                responseMsg.role.toString,
-                responseMsg.id,
-                responseMsg.content.text,
-                responseMsg.agentId
-              )
+      val analysisContext =
+        contextWithDetails.copy(
+          metadata = contextWithDetails.metadata + ("productDetails" -> productDetails)
+        )
+
+      val prompt = buildPrompt(productDetails, analysisContext, capability)
+      val userMsg = Message(
+        role = MessageRole.User,
+        content = MessageContent(prompt, metadata = Map("stepId" -> stepId)),
+        conversationId = analysisContext.id
+      )
+
+      provider
+        .completion(
+          Seq(userMsg),
+          capability.config.getOrElse(
+            "systemPrompt",
+            "You are a banking risk officer. Ground every assessment in the FIBO ontology definitions provided."
+          )
+        )
+        .onComplete {
+          case Success(resultText) =>
+            val responseMsg = Message(
+              role = MessageRole.Assistant,
+              content = MessageContent(
+                resultText,
+                metadata = Map(
+                  "satisfied" -> "true",
+                  "analysisFramework" -> "FIBO"
+                )
+              ),
+              conversationId = analysisContext.id,
+              agentId = Some(capability.name)
             )
-            bus ! UiEventBus.Publish(
-              UiEventBus.AgentComplete(
-                context.id,
-                capability.name,
-                stepId,
-                responseMsg.id,
-                responseMsg.content.text.length
+
+            uiBus.foreach { bus =>
+              bus ! UiEventBus.Publish(
+                UiEventBus.ChatMessage(
+                  analysisContext.id,
+                  responseMsg.role.toString,
+                  responseMsg.id,
+                  responseMsg.content.text,
+                  responseMsg.agentId
+                )
               )
+              bus ! UiEventBus.Publish(
+                UiEventBus.AgentComplete(
+                  analysisContext.id,
+                  capability.name,
+                  stepId,
+                  responseMsg.id,
+                  responseMsg.content.text.length
+                )
+              )
+            }
+
+            replyTo ! BaseAgent.ProcessedMessage(
+              responseMsg,
+              analysisContext
+                .addMessage(message)
+                .addMessage(responseMsg)
             )
-          }
 
-          replyTo ! BaseAgent.ProcessedMessage(
-            responseMsg,
-            context
-              .addMessage(message)
-              .addMessage(responseMsg)
-          )
-
-        case Failure(ex) =>
-          val err = s"FIBO risk analysis failed: ${ex.getMessage}"
-          ctx.log.error(err, ex)
-          uiBus.foreach(
-            _ ! UiEventBus.Publish(UiEventBus.ErrorEvent(context.id, err))
-          )
-          replyTo ! BaseAgent.ProcessingFailed(err, message.id)
-      }
+          case Failure(ex) =>
+            val err = s"FIBO risk analysis failed: ${ex.getMessage}"
+            ctx.log.error(err, ex)
+            uiBus.foreach(
+              _ ! UiEventBus.Publish(UiEventBus.ErrorEvent(context.id, err))
+            )
+            replyTo ! BaseAgent.ProcessingFailed(err, message.id)
+        }
 
   private def buildPrompt(
-      message: Message,
+      productDetails: String,
       context: ConversationContext,
       capability: AgentCapability
   ): String =
-    val productContext = message.content.text.trim
+    val productContext = productDetails.trim
     val metadataLines =
       if context.metadata.nonEmpty then
         context.metadata.toSeq
@@ -234,3 +276,104 @@ object FiboRiskAgent:
        |
        |Respond in markdown with clear sections per dimension and overall summary.
        |""".stripMargin
+
+  private def integrateClarificationIntoContext(
+      message: Message,
+      context: ConversationContext
+  ): ConversationContext =
+    val clarifiedDetails =
+      message.content.metadata
+        .get("clarificationTopic")
+        .filter(_ == "product-details")
+        .flatMap(_ => Option(message.content.text.trim))
+        .filter(_.nonEmpty)
+
+    val metadataDetails =
+      message.content.metadata.get("productDetails").filter(_.nonEmpty)
+
+    clarifiedDetails
+      .orElse(metadataDetails)
+      .map(detail =>
+        context.copy(metadata = context.metadata + ("productDetails" -> detail))
+      )
+      .getOrElse(context)
+
+  private def extractProductDetails(
+      message: Message,
+      context: ConversationContext
+  ): Option[String] =
+    val fromContext = context.metadata.get("productDetails").filter(_.nonEmpty)
+
+    val fromConversation =
+      context.messages.reverseIterator
+        .collectFirst {
+          case msg
+              if msg.content.metadata
+                .get("clarificationTopic")
+                .contains("product-details") =>
+            msg.content.text.trim
+        }
+        .filter(_.nonEmpty)
+
+    val fromMessageMetadata =
+      message.content.metadata.get("productDetails").filter(_.nonEmpty)
+
+    val fromClarification =
+      message.content.metadata
+        .get("clarificationTopic")
+        .filter(_ == "product-details")
+        .flatMap(_ => Option(message.content.text.trim))
+        .filter(_.nonEmpty)
+
+    val fromBody =
+      Option(message.content.text.trim)
+        .filter(text => text.nonEmpty && text.length > 40)
+
+    fromClarification
+      .orElse(fromMessageMetadata)
+      .orElse(fromContext)
+      .orElse(fromConversation)
+      .orElse(fromBody)
+
+  private def buildProductClarificationRequest(
+      capability: AgentCapability,
+      context: ConversationContext,
+      stepId: String,
+      attempt: Int
+  ): BaseAgent.ClarificationRequest =
+    val clarificationId = UUID.randomUUID().toString
+    val questionText =
+      """I need a complete product brief before running a FIBO-aligned risk assessment.
+        |- Summarize the product and its purpose.
+        |- Identify target customer segments.
+        |- Describe expected cash inflows and outflows.
+        |- List collateral, guarantees, or risk mitigations.
+        |- Mention regulatory constraints or eligibility criteria.
+        |
+        |Provide concise bullet points. Only reply with "clarification-needed" if you truly cannot supply the details.
+        |""".stripMargin
+
+    val metadata = Map(
+      "clarificationTopic" -> "product-details",
+      "clarificationId" -> clarificationId,
+      "clarificationCapability" -> "creator",
+      "clarificationSkill" -> "create idea,banking expertise",
+      "clarificationAttempt" -> attempt.toString,
+      "requestedBy" -> capability.name
+    )
+
+    val question = Message(
+      role = MessageRole.Agent,
+      content = MessageContent(questionText, metadata),
+      conversationId = context.id,
+      agentId = Some(capability.name)
+    )
+
+    BaseAgent.ClarificationRequest(
+      originalStepId = stepId,
+      question = question,
+      context = context,
+      targetCapabilities = Set("creator"),
+      targetSkills = Set("create idea", "banking expertise"),
+      metadata = metadata
+    )

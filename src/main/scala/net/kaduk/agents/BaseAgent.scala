@@ -28,6 +28,14 @@ object BaseAgent:
   case class ProcessedMessage(message: Message, updatedContext: ConversationContext) extends Response with Command
   case class ProcessingFailed(error: String, messageId: String) extends Response with Command
   case class AgentStatusResponse(status: String, load: Int) extends Response with Command
+  case class ClarificationRequest(
+    originalStepId: String,
+    question: Message,
+    context: ConversationContext,
+    targetCapabilities: Set[String] = Set.empty,
+    targetSkills: Set[String] = Set.empty,
+    metadata: Map[String, String] = Map.empty
+  ) extends Response with Command
   
   sealed trait StreamResponse
   case class StreamChunk(content: String, messageId: String) extends StreamResponse

@@ -19,6 +19,7 @@ import org.slf4j.LoggerFactory
 import scala.concurrent.{ExecutionContext, Future}
 import scala.concurrent.duration.*
 import scala.util.{Failure, Success, Try}
+import java.util.UUID
 
 object WebCrawlerAgent:
 
@@ -100,6 +101,18 @@ object WebCrawlerAgent:
     val stepId = message.content.metadata.getOrElse("stepId", "crawl")
     ctx.log.info(s"[${capability.name}] Processing crawl request step=$stepId")
 
+    val attempt = message.content.metadata
+      .get("clarificationAttempt")
+      .flatMap(v => Try(v.toInt).toOption)
+      .getOrElse(0)
+
+    val maxAttempts = capability.config
+      .get("maxClarificationRounds")
+      .flatMap(v => Try(v.toInt).toOption)
+      .getOrElse(3)
+
+    val workingContext = integrateUrlClarification(message, context)
+
     uiBus.foreach(
       _ ! UiEventBus.Publish(
         UiEventBus.AgentStart(context.id, capability.name, stepId, message.id, false)
@@ -117,21 +130,39 @@ object WebCrawlerAgent:
       )
     )
 
-    resolveTargetUrl(message, capability) match
+    resolveTargetUrl(message, workingContext, capability) match
       case Left(err) =>
-        ctx.log.warn(s"[${capability.name}] Unable to resolve URL: $err")
-        uiBus.foreach(
-          _ ! UiEventBus.Publish(UiEventBus.ErrorEvent(context.id, err))
-        )
-        replyTo ! BaseAgent.ProcessingFailed(err, message.id)
+        if attempt < maxAttempts then
+          val request = buildUrlClarificationRequest(
+            capability,
+            workingContext,
+            stepId,
+            attempt + 1,
+            err
+          )
+          ctx.log.info(
+            s"[${capability.name}] Requesting URL clarification (attempt ${attempt + 1})"
+          )
+          replyTo ! request
+        else
+          ctx.log.warn(s"[${capability.name}] Unable to resolve URL: $err")
+          uiBus.foreach(
+            _ ! UiEventBus.Publish(UiEventBus.ErrorEvent(context.id, err))
+          )
+          replyTo ! BaseAgent.ProcessingFailed(err, message.id)
 
       case Right(url) =>
+        val enrichedContext =
+          workingContext.copy(
+            metadata = workingContext.metadata + ("targetUrl" -> url)
+          )
+
         val crawlFut =
           for
             rawHtml <- fetchUrl(http, url)
             text = sanitizeHtml(rawHtml)
             limited = applyContentLimit(text, capability)
-            summary <- summarize(url, limited, provider, context, capability)
+            summary <- summarize(url, limited, provider, enrichedContext, capability)
           yield (limited, summary)
 
         crawlFut.onComplete {
@@ -143,14 +174,14 @@ object WebCrawlerAgent:
                 combined,
                 metadata = Map("sourceUrl" -> url, "satisfied" -> "true")
               ),
-              conversationId = context.id,
+              conversationId = enrichedContext.id,
               agentId = Some(capability.name)
             )
 
             uiBus.foreach { bus =>
               bus ! UiEventBus.Publish(
                 UiEventBus.ChatMessage(
-                  context.id,
+                  enrichedContext.id,
                   responseMsg.role.toString,
                   responseMsg.id,
                   responseMsg.content.text,
@@ -159,7 +190,7 @@ object WebCrawlerAgent:
               )
               bus ! UiEventBus.Publish(
                 UiEventBus.AgentComplete(
-                  context.id,
+                  enrichedContext.id,
                   capability.name,
                   stepId,
                   responseMsg.id,
@@ -170,7 +201,7 @@ object WebCrawlerAgent:
 
             replyTo ! BaseAgent.ProcessedMessage(
               responseMsg,
-              context
+              enrichedContext
                 .addMessage(message)
                 .addMessage(responseMsg)
             )
@@ -186,6 +217,7 @@ object WebCrawlerAgent:
 
   private def resolveTargetUrl(
       message: Message,
+      context: ConversationContext,
       capability: AgentCapability
   ): Either[String, String] =
     val metadataUrl = message.content.metadata
@@ -193,11 +225,15 @@ object WebCrawlerAgent:
       .orElse(message.content.metadata.get("targetUrl"))
 
     val textUrl = extractUrlFromText(message.content.text)
+    val contextUrl = context.metadata
+      .get("targetUrl")
+      .orElse(context.metadata.get("url"))
     val defaultUrl = capability.config
       .get("default-url")
       .orElse(capability.config.get("base-url"))
 
-    val resolved = metadataUrl.orElse(textUrl).orElse(defaultUrl)
+    val resolved =
+      metadataUrl.orElse(textUrl).orElse(contextUrl).orElse(defaultUrl)
 
     resolved match
       case None => Left("No URL provided for crawling.")
@@ -242,6 +278,69 @@ object WebCrawlerAgent:
           case Some(h) =>
             Left(s"URL host $h not allowed. Expected domain ending with $domain.")
           case None => Left("Unable to determine URL host.")
+
+  private def integrateUrlClarification(
+      message: Message,
+      context: ConversationContext
+  ): ConversationContext =
+    val clarified =
+      message.content.metadata
+        .get("clarificationTopic")
+        .filter(_ == "web-url")
+        .flatMap(_ => extractUrlFromText(message.content.text))
+
+    val metadataUrl =
+      message.content.metadata
+        .get("url")
+        .orElse(message.content.metadata.get("targetUrl"))
+
+    clarified
+      .orElse(metadataUrl)
+      .filter(_.nonEmpty)
+      .map(url => context.copy(metadata = context.metadata + ("targetUrl" -> url)))
+      .getOrElse(context)
+
+  private def buildUrlClarificationRequest(
+      capability: AgentCapability,
+      context: ConversationContext,
+      stepId: String,
+      attempt: Int,
+      reason: String
+  ): BaseAgent.ClarificationRequest =
+    val clarificationId = UUID.randomUUID().toString
+    val questionText =
+      s"""Provide the exact URL to crawl for this task.
+         |- Include the full http(s) scheme.
+         |- Only respond with a single URL.
+         |- If the URL is unknown, reply with "clarification-needed".
+         |
+         |Reason: $reason
+         |""".stripMargin
+
+    val metadata = Map(
+      "clarificationTopic" -> "web-url",
+      "clarificationId" -> clarificationId,
+      "clarificationCapability" -> "creator",
+      "clarificationSkill" -> "search,summarization",
+      "clarificationAttempt" -> attempt.toString,
+      "requestedBy" -> capability.name
+    )
+
+    val question = Message(
+      role = MessageRole.Agent,
+      content = MessageContent(questionText, metadata),
+      conversationId = context.id,
+      agentId = Some(capability.name)
+    )
+
+    BaseAgent.ClarificationRequest(
+      originalStepId = stepId,
+      question = question,
+      context = context,
+      targetCapabilities = Set("creator"),
+      targetSkills = Set("search", "summarization"),
+      metadata = metadata
+    )
 
   private val urlRegex =
     "(https?://[\\w\\-._~:/?#\\[\\]@!$&'()*+,;=%]+)".r

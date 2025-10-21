@@ -19,6 +19,7 @@ import scala.concurrent.{ExecutionContext, Future}
 import scala.concurrent.duration.*
 import scala.util.{Failure, Success, Try}
 import scala.xml.{Elem, Node, XML}
+import java.util.UUID
 
 object RssReaderAgent:
 
@@ -102,6 +103,18 @@ object RssReaderAgent:
     val stepId = message.content.metadata.getOrElse("stepId", "rss")
     ctx.log.info(s"[${capability.name}] Processing RSS request step=$stepId")
 
+    val attempt = message.content.metadata
+      .get("clarificationAttempt")
+      .flatMap(v => Try(v.toInt).toOption)
+      .getOrElse(0)
+
+    val maxAttempts = capability.config
+      .get("maxClarificationRounds")
+      .flatMap(v => Try(v.toInt).toOption)
+      .getOrElse(3)
+
+    val workingContext = integrateFeedClarification(message, context)
+
     uiBus.foreach(
       _ ! UiEventBus.Publish(
         UiEventBus.AgentStart(context.id, capability.name, stepId, message.id, false)
@@ -119,21 +132,38 @@ object RssReaderAgent:
       )
     )
 
-    resolveFeedUrl(message, capability) match
+    resolveFeedUrl(message, workingContext, capability) match
       case Left(err) =>
-        ctx.log.warn(s"[${capability.name}] Unable to resolve feed URL: $err")
-        uiBus.foreach(
-          _ ! UiEventBus.Publish(UiEventBus.ErrorEvent(context.id, err))
-        )
-        replyTo ! BaseAgent.ProcessingFailed(err, message.id)
+        if attempt < maxAttempts then
+          val request = buildFeedClarificationRequest(
+            capability,
+            workingContext,
+            stepId,
+            attempt + 1,
+            err
+          )
+          ctx.log.info(
+            s"[${capability.name}] Requesting RSS URL clarification (attempt ${attempt + 1})"
+          )
+          replyTo ! request
+        else
+          ctx.log.warn(s"[${capability.name}] Unable to resolve feed URL: $err")
+          uiBus.foreach(
+            _ ! UiEventBus.Publish(UiEventBus.ErrorEvent(context.id, err))
+          )
+          replyTo ! BaseAgent.ProcessingFailed(err, message.id)
 
       case Right(url) =>
+        val enrichedContext =
+          workingContext.copy(
+            metadata = workingContext.metadata + ("feedUrl" -> url)
+          )
         val fetchFuture =
           for
             xmlString <- fetchFeed(http, url)
             feedXml <- Future.fromTry(parseXml(xmlString))
             items = extractItems(feedXml, capability)
-            summary <- summarizeFeed(url, items, provider, context, capability)
+            summary <- summarizeFeed(url, items, provider, enrichedContext, capability)
           yield (items, summary)
 
         fetchFuture.onComplete {
@@ -144,14 +174,14 @@ object RssReaderAgent:
                 formatResponse(url, items, summary),
                 metadata = Map("sourceUrl" -> url, "satisfied" -> "true")
               ),
-              conversationId = context.id,
+              conversationId = enrichedContext.id,
               agentId = Some(capability.name)
             )
 
             uiBus.foreach { bus =>
               bus ! UiEventBus.Publish(
                 UiEventBus.ChatMessage(
-                  context.id,
+                  enrichedContext.id,
                   responseMsg.role.toString,
                   responseMsg.id,
                   responseMsg.content.text,
@@ -160,7 +190,7 @@ object RssReaderAgent:
               )
               bus ! UiEventBus.Publish(
                 UiEventBus.AgentComplete(
-                  context.id,
+                  enrichedContext.id,
                   capability.name,
                   stepId,
                   responseMsg.id,
@@ -171,7 +201,7 @@ object RssReaderAgent:
 
             replyTo ! BaseAgent.ProcessedMessage(
               responseMsg,
-              context
+              enrichedContext
                 .addMessage(message)
                 .addMessage(responseMsg)
             )
@@ -187,17 +217,23 @@ object RssReaderAgent:
 
   private def resolveFeedUrl(
       message: Message,
+      context: ConversationContext,
       capability: AgentCapability
   ): Either[String, String] =
     val metaUrl = message.content.metadata
       .get("feedUrl")
       .orElse(message.content.metadata.get("url"))
     val textUrl = extractUrlFromText(message.content.text)
+    val contextUrl =
+      context.metadata
+        .get("feedUrl")
+        .orElse(context.metadata.get("targetUrl"))
     val defaultUrl = capability.config
       .get("feed-url")
       .orElse(capability.config.get("default-url"))
 
-    val resolved = metaUrl.orElse(textUrl).orElse(defaultUrl)
+    val resolved =
+      metaUrl.orElse(textUrl).orElse(contextUrl).orElse(defaultUrl)
 
     resolved match
       case None => Left("No RSS feed URL provided.")
@@ -211,6 +247,68 @@ object RssReaderAgent:
 
   private def extractUrlFromText(text: String): Option[String] =
     urlRegex.findFirstIn(text)
+
+  private def integrateFeedClarification(
+      message: Message,
+      context: ConversationContext
+  ): ConversationContext =
+    val clarified =
+      message.content.metadata
+        .get("clarificationTopic")
+        .filter(_ == "rss-url")
+        .flatMap(_ => extractUrlFromText(message.content.text))
+
+    val metadataUrl =
+      message.content.metadata
+        .get("feedUrl")
+        .orElse(message.content.metadata.get("url"))
+
+    clarified
+      .orElse(metadataUrl)
+      .filter(_.nonEmpty)
+      .map(url => context.copy(metadata = context.metadata + ("feedUrl" -> url)))
+      .getOrElse(context)
+
+  private def buildFeedClarificationRequest(
+      capability: AgentCapability,
+      context: ConversationContext,
+      stepId: String,
+      attempt: Int,
+      reason: String
+  ): BaseAgent.ClarificationRequest =
+    val clarificationId = UUID.randomUUID().toString
+    val questionText =
+      s"""Provide the RSS or Atom feed URL required for this task.
+         |- Return only a single URL using http(s).
+         |- If the feed is unavailable, reply with "clarification-needed".
+         |
+         |Reason: $reason
+         |""".stripMargin
+
+    val metadata = Map(
+      "clarificationTopic" -> "rss-url",
+      "clarificationId" -> clarificationId,
+      "clarificationCapability" -> "creator",
+      "clarificationSkill" -> "research,monitoring",
+      "clarificationAttempt" -> attempt.toString,
+      "requestedBy" -> capability.name
+    )
+
+    val question = Message(
+      role = MessageRole.Agent,
+      content = MessageContent(questionText, metadata),
+      conversationId = context.id,
+      agentId = Some(capability.name)
+    )
+
+    BaseAgent.ClarificationRequest(
+      originalStepId = stepId,
+      question = question,
+      context = context,
+      targetCapabilities = Set("creator"),
+      targetSkills = Set("research", "monitoring"),
+      metadata = metadata
+    )
 
   private def normalizeUrl(url: String): Either[String, String] =
     val trimmed = url.trim

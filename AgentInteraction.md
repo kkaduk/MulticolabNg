@@ -35,6 +35,15 @@ The **AgentRegistry** tracks all active capabilities and skills so the coordinat
 
 ---
 
+## Clarification Loop
+
+- Agents that detect missing inputs emit a `ClarificationRequest` containing the question, desired capabilities/skills, and a shared conversation context.
+- The delegating agent (often `MainEntryPoint`) routes the question to a suitable peer (e.g., `Creator` for product briefs, `RssBriefing` for monitoring data) and relays the answer back to the original worker.
+- Each clarification exchange preserves metadata such as `clarificationTopic`, `clarificationId`, and `clarificationAttempt`, enabling agents to track progress and avoid infinite loops.
+- The loop continues until the worker marks the ambiguity resolved (metadata `clarificationResolved=true`) and delivers the final step output, after which UI telemetry records the completion.
+
+---
+
 ## System Architecture (Mermaid)
 
 ```mermaid
